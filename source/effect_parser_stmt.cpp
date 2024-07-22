@@ -8,14 +8,15 @@
 #include "effect_codegen.hpp"
 #include <cctype> // std::toupper
 #include <cassert>
+#include <algorithm> // std::max, std::replace, std::transform
 #include <functional>
 #include <string_view>
 
-struct on_scope_exit
+struct scope_guard
 {
-	template <typename F>
-	explicit on_scope_exit(F lambda) : leave(lambda) { }
-	~on_scope_exit() { leave(); }
+	template <typename E, typename L>
+	explicit scope_guard(E &&enter_lambda, L &&leave_lambda) : leave(leave_lambda) { enter_lambda(); }
+	~scope_guard() { leave(); }
 
 	std::function<void()> leave;
 };
@@ -35,7 +36,8 @@ bool reshadefx::parser::parse(std::string input, codegen *backend)
 
 	while (!peek(tokenid::end_of_file))
 	{
-		parse_top(current_success);
+		if (!parse_top(current_success))
+			return false;
 		if (!current_success)
 			parse_success = false;
 	}
@@ -43,24 +45,18 @@ bool reshadefx::parser::parse(std::string input, codegen *backend)
 	return parse_success;
 }
 
-void reshadefx::parser::parse_top(bool &parse_success)
+bool reshadefx::parser::parse_top(bool &parse_success)
 {
 	if (accept(tokenid::namespace_))
 	{
 		// Anonymous namespaces are not supported right now, so an identifier is a must
 		if (!expect(tokenid::identifier))
-		{
-			parse_success = false;
-			return;
-		}
+			return false;
 
-		const auto name = std::move(_token.literal_as_string);
+		const std::string name = std::move(_token.literal_as_string);
 
 		if (!expect('{'))
-		{
-			parse_success = false;
-			return;
-		}
+			return false;
 
 		enter_namespace(name);
 
@@ -70,7 +66,8 @@ void reshadefx::parser::parse_top(bool &parse_success)
 		// Recursively parse top level statements until the namespace is closed again
 		while (!peek('}')) // Empty namespaces are valid
 		{
-			parse_top(current_success);
+			if (!parse_top(current_success))
+				return false;
 			if (!current_success)
 				parse_success_namespace = false;
 		}
@@ -90,43 +87,120 @@ void reshadefx::parser::parse_top(bool &parse_success)
 	}
 	else
 	{
-		if (type type; parse_type(type)) // Type found, this can be either a variable or a function declaration
+		location attribute_location;
+		shader_type stype = shader_type::unknown;
+		int num_threads[3] = { 0, 0, 0 };
+
+		// Read any function attributes first
+		while (accept('['))
+		{
+			if (!expect(tokenid::identifier))
+				return false;
+
+			const std::string attribute = std::move(_token.literal_as_string);
+
+			if (attribute == "shader")
+			{
+				attribute_location = _token_next.location;
+
+				if (!expect('(') || !expect(tokenid::string_literal))
+					return false;
+
+				if (_token.literal_as_string == "vertex")
+					stype = shader_type::vertex;
+				else if (_token.literal_as_string == "pixel")
+					stype = shader_type::pixel;
+				else if (_token.literal_as_string == "compute")
+					stype = shader_type::compute;
+
+				if (!expect(')'))
+					return false;
+			}
+			else if (attribute == "numthreads")
+			{
+				attribute_location = _token_next.location;
+
+				expression x, y, z;
+				if (!expect('(') || !parse_expression_multary(x, 8) || !expect(',') || !parse_expression_multary(y, 8) || !expect(',') || !parse_expression_multary(z, 8) || !expect(')'))
+					return false;
+
+				if (!x.is_constant)
+				{
+					error(x.location, 3011, "value must be a literal expression");
+					parse_success = false;
+				}
+				if (!y.is_constant)
+				{
+					error(y.location, 3011, "value must be a literal expression");
+					parse_success = false;
+				}
+				if (!z.is_constant)
+				{
+					error(z.location, 3011, "value must be a literal expression");
+					parse_success = false;
+				}
+				x.add_cast_operation({ type::t_int, 1, 1 });
+				y.add_cast_operation({ type::t_int, 1, 1 });
+				z.add_cast_operation({ type::t_int, 1, 1 });
+				num_threads[0] = x.constant.as_int[0];
+				num_threads[1] = y.constant.as_int[0];
+				num_threads[2] = z.constant.as_int[0];
+			}
+			else
+			{
+				warning(_token.location, 0, "unknown attribute '" + attribute + "'");
+			}
+
+			if (!expect(']'))
+				return false;
+		}
+
+		if (type type = {}; parse_type(type)) // Type found, this can be either a variable or a function declaration
 		{
 			parse_success = expect(tokenid::identifier);
 			if (!parse_success)
-				return;
+				return true;
 
 			if (peek('('))
 			{
-				const auto name = std::move(_token.literal_as_string);
+				const std::string name = std::move(_token.literal_as_string);
+
 				// This is definitely a function declaration, so parse it
-				if (!parse_function(type, name))
+				if (!parse_function(type, name, stype, num_threads))
 				{
 					// Insert dummy function into symbol table, so later references can be resolved despite the error
-					insert_symbol(name, { symbol_type::function, ~0u, { type::t_function } }, true);
+					insert_symbol(name, { symbol_type::function, UINT32_MAX, { type::t_function } }, true);
 					parse_success = false;
-					return;
+					return true;
 				}
 			}
 			else
 			{
+				if (!attribute_location.source.empty())
+				{
+					error(attribute_location, 0, "attribute is valid only on functions");
+					parse_success = false;
+				}
+
 				// There may be multiple variable names after the type, handle them all
 				unsigned int count = 0;
 				do {
 					if (count++ > 0 && !(expect(',') && expect(tokenid::identifier)))
 					{
 						parse_success = false;
-						return;
+						return false;
 					}
-					const auto name = std::move(_token.literal_as_string);
+
+					const std::string name = std::move(_token.literal_as_string);
+
 					if (!parse_variable(type, name, true))
 					{
 						// Insert dummy variable into symbol table, so later references can be resolved despite the error
-						insert_symbol(name, { symbol_type::variable, ~0u, type }, true);
+						insert_symbol(name, { symbol_type::variable, UINT32_MAX, type }, true);
 						// Skip the rest of the statement
 						consume_until(';');
 						parse_success = false;
-						return;
+						return true;
 					}
 				} while (!peek(';'));
 
@@ -149,6 +223,8 @@ void reshadefx::parser::parse_top(bool &parse_success)
 			parse_success = false;
 		}
 	}
+
+	return true;
 }
 
 bool reshadefx::parser::parse_statement(bool scoped)
@@ -172,7 +248,7 @@ bool reshadefx::parser::parse_statement(bool scoped)
 			switch_call = (0x8 << 4)
 		};
 
-		const auto attribute = std::move(_token_next.literal_as_string);
+		const std::string attribute = std::move(_token_next.literal_as_string);
 
 		if (!expect(tokenid::identifier) || !expect(']'))
 			return false;
@@ -190,7 +266,7 @@ bool reshadefx::parser::parse_statement(bool scoped)
 		else if (attribute == "call")
 			selection_control |= switch_call;
 		else
-			warning(_token.location, 0, "unknown attribute");
+			warning(_token.location, 0, "unknown attribute '" + attribute + "'");
 
 		if ((loop_control & (unroll | dont_unroll)) == (unroll | dont_unroll))
 			return error(_token.location, 3524, "can't use loop and unroll attributes together"), false;
@@ -203,7 +279,8 @@ bool reshadefx::parser::parse_statement(bool scoped)
 
 	if (peek('{')) // Parse statement block
 		return parse_statement_block(scoped);
-	else if (accept(';')) // Ignore empty statements
+
+	if (accept(';')) // Ignore empty statements
 		return true;
 
 	// Most statements with the exception of declarations are only valid inside functions
@@ -211,7 +288,7 @@ bool reshadefx::parser::parse_statement(bool scoped)
 	{
 		assert(_current_function != nullptr);
 
-		const auto location = _token_next.location;
+		const location statement_location = _token_next.location;
 
 		if (accept(tokenid::if_))
 		{
@@ -219,16 +296,17 @@ bool reshadefx::parser::parse_statement(bool scoped)
 			codegen::id false_block = _codegen->create_block(); // Block which contains the statements executed when the condition is false
 			const codegen::id merge_block = _codegen->create_block(); // Block that is executed after the branch re-merged with the current control flow
 
-			expression condition;
-			if (!expect('(') || !parse_expression(condition) || !expect(')'))
+			expression condition_exp;
+			if (!expect('(') || !parse_expression(condition_exp) || !expect(')'))
 				return false;
-			else if (!condition.type.is_scalar())
-				return error(condition.location, 3019, "if statement conditional expressions must evaluate to a scalar"), false;
 
-			// Load condition and convert to boolean value as required by 'OpBranchConditional'
-			condition.add_cast_operation({ type::t_bool, 1, 1 });
+			if (!condition_exp.type.is_scalar())
+				return error(condition_exp.location, 3019, "if statement conditional expressions must evaluate to a scalar"), false;
 
-			const codegen::id condition_value = _codegen->emit_load(condition);
+			// Load condition and convert to boolean value as required by 'OpBranchConditional' in SPIR-V
+			condition_exp.add_cast_operation({ type::t_bool, 1, 1 });
+
+			const codegen::id condition_value = _codegen->emit_load(condition_exp);
 			const codegen::id condition_block = _codegen->leave_block_and_branch_conditional(condition_value, true_block, false_block);
 
 			{ // Then block of the if statement
@@ -251,7 +329,7 @@ bool reshadefx::parser::parse_statement(bool scoped)
 			_codegen->enter_block(merge_block);
 
 			// Emit structured control flow for an if statement and connect all basic blocks
-			_codegen->emit_if(location, condition_value, condition_block, true_block, false_block, selection_control);
+			_codegen->emit_if(statement_location, condition_value, condition_block, true_block, false_block, selection_control);
 
 			return true;
 		}
@@ -263,20 +341,26 @@ bool reshadefx::parser::parse_statement(bool scoped)
 			expression selector_exp;
 			if (!expect('(') || !parse_expression(selector_exp) || !expect(')'))
 				return false;
-			else if (!selector_exp.type.is_scalar())
+
+			if (!selector_exp.type.is_scalar())
 				return error(selector_exp.location, 3019, "switch statement expression must evaluate to a scalar"), false;
 
 			// Load selector and convert to integral value as required by switch instruction
 			selector_exp.add_cast_operation({ type::t_int, 1, 1 });
 
-			const auto selector_value = _codegen->emit_load(selector_exp);
-			const auto selector_block = _codegen->leave_block_and_switch(selector_value, merge_block);
+			const codegen::id selector_value = _codegen->emit_load(selector_exp);
+			const codegen::id selector_block = _codegen->leave_block_and_switch(selector_value, merge_block);
 
 			if (!expect('{'))
 				return false;
 
-			_loop_break_target_stack.push_back(merge_block);
-			on_scope_exit _([this]() { _loop_break_target_stack.pop_back(); });
+			scope_guard _(
+				[this, merge_block]() {
+					_loop_break_target_stack.push_back(merge_block);
+				},
+				[this]() {
+					_loop_break_target_stack.pop_back();
+				});
 
 			bool parse_success = true;
 			// The default case jumps to the end of the switch statement if not overwritten
@@ -297,7 +381,8 @@ bool reshadefx::parser::parse_statement(bool scoped)
 						expression case_label;
 						if (!parse_expression(case_label))
 							return consume_until('}'), false;
-						else if (!case_label.type.is_scalar() || !case_label.type.is_integral() || !case_label.is_constant)
+
+						if (!case_label.type.is_scalar() || !case_label.type.is_integral() || !case_label.is_constant)
 							return error(case_label.location, 3020, "invalid type for case expression - value must be an integer scalar"), consume_until('}'), false;
 
 						// Check for duplicate case values
@@ -368,10 +453,10 @@ bool reshadefx::parser::parse_statement(bool scoped)
 			}
 
 			if (case_literal_and_labels.empty() && default_label == merge_block)
-				warning(location, 5002, "switch statement contains no 'case' or 'default' labels");
+				warning(statement_location, 5002, "switch statement contains no 'case' or 'default' labels");
 
 			// Emit structured control flow for a switch statement and connect all basic blocks
-			_codegen->emit_switch(location, selector_value, selector_block, default_label, default_block, case_literal_and_labels, case_blocks, selection_control);
+			_codegen->emit_switch(statement_location, selector_value, selector_block, default_label, default_block, case_literal_and_labels, case_blocks, selection_control);
 
 			return expect('}') && parse_success;
 		}
@@ -381,11 +466,12 @@ bool reshadefx::parser::parse_statement(bool scoped)
 			if (!expect('('))
 				return false;
 
-			enter_scope();
-			on_scope_exit _([this]() { leave_scope(); });
+			scope_guard _(
+				[this]() { enter_scope(); },
+				[this]() { leave_scope(); });
 
 			// Parse initializer first
-			if (type type; parse_type(type))
+			if (type type = {}; parse_type(type))
 			{
 				unsigned int count = 0;
 				do { // There may be multiple declarations behind a type, so loop through them
@@ -400,8 +486,8 @@ bool reshadefx::parser::parse_statement(bool scoped)
 				// Initializer can also contain an expression if not a variable declaration list and not empty
 				if (!peek(';'))
 				{
-					expression expression;
-					if (!parse_expression(expression))
+					expression initializer_exp;
+					if (!parse_expression(initializer_exp))
 						return false;
 				}
 			}
@@ -430,18 +516,17 @@ bool reshadefx::parser::parse_statement(bool scoped)
 
 				if (!peek(';'))
 				{
-					expression condition;
-					if (!parse_expression(condition))
+					expression condition_exp;
+					if (!parse_expression(condition_exp))
 						return false;
 
-					if (!condition.type.is_scalar())
-						return error(condition.location, 3019, "scalar value expected"), false;
+					if (!condition_exp.type.is_scalar())
+						return error(condition_exp.location, 3019, "scalar value expected"), false;
 
 					// Evaluate condition and branch to the right target
-					condition.add_cast_operation({ type::t_bool, 1, 1 });
+					condition_exp.add_cast_operation({ type::t_bool, 1, 1 });
 
-					condition_value = _codegen->emit_load(condition);
-
+					condition_value = _codegen->emit_load(condition_exp);
 					condition_block = _codegen->leave_block_and_branch_conditional(condition_value, loop_block, merge_block);
 				}
 				else // It is valid for there to be no condition expression
@@ -491,15 +576,16 @@ bool reshadefx::parser::parse_statement(bool scoped)
 			_codegen->enter_block(merge_block);
 
 			// Emit structured control flow for a loop statement and connect all basic blocks
-			_codegen->emit_loop(location, condition_value, prev_block, header_label, condition_block, loop_block, continue_label, loop_control);
+			_codegen->emit_loop(statement_location, condition_value, prev_block, header_label, condition_block, loop_block, continue_label, loop_control);
 
 			return true;
 		}
 
 		if (accept(tokenid::while_))
 		{
-			enter_scope();
-			on_scope_exit _([this]() { leave_scope(); });
+			scope_guard _(
+				[this]() { enter_scope(); },
+				[this]() { leave_scope(); });
 
 			const codegen::id merge_block = _codegen->create_block();
 			const codegen::id header_label = _codegen->create_block();
@@ -520,17 +606,17 @@ bool reshadefx::parser::parse_statement(bool scoped)
 			{ // Parse condition block
 				_codegen->enter_block(condition_block);
 
-				expression condition;
-				if (!expect('(') || !parse_expression(condition) || !expect(')'))
+				expression condition_exp;
+				if (!expect('(') || !parse_expression(condition_exp) || !expect(')'))
 					return false;
-				else if (!condition.type.is_scalar())
-					return error(condition.location, 3019, "scalar value expected"), false;
+
+				if (!condition_exp.type.is_scalar())
+					return error(condition_exp.location, 3019, "scalar value expected"), false;
 
 				// Evaluate condition and branch to the right target
-				condition.add_cast_operation({ type::t_bool, 1, 1 });
+				condition_exp.add_cast_operation({ type::t_bool, 1, 1 });
 
-				condition_value = _codegen->emit_load(condition);
-
+				condition_value = _codegen->emit_load(condition_exp);
 				condition_block = _codegen->leave_block_and_branch_conditional(condition_value, loop_block, merge_block);
 			}
 
@@ -561,7 +647,7 @@ bool reshadefx::parser::parse_statement(bool scoped)
 			_codegen->enter_block(merge_block);
 
 			// Emit structured control flow for a loop statement and connect all basic blocks
-			_codegen->emit_loop(location, condition_value, prev_block, header_label, condition_block, loop_block, continue_label, loop_control);
+			_codegen->emit_loop(statement_location, condition_value, prev_block, header_label, condition_block, loop_block, continue_label, loop_control);
 
 			return true;
 		}
@@ -603,16 +689,17 @@ bool reshadefx::parser::parse_statement(bool scoped)
 			{ // Continue block does the condition evaluation
 				_codegen->enter_block(continue_label);
 
-				expression condition;
-				if (!expect(tokenid::while_) || !expect('(') || !parse_expression(condition) || !expect(')') || !expect(';'))
+				expression condition_exp;
+				if (!expect(tokenid::while_) || !expect('(') || !parse_expression(condition_exp) || !expect(')') || !expect(';'))
 					return false;
-				else if (!condition.type.is_scalar())
-					return error(condition.location, 3019, "scalar value expected"), false;
+
+				if (!condition_exp.type.is_scalar())
+					return error(condition_exp.location, 3019, "scalar value expected"), false;
 
 				// Evaluate condition and branch to the right target
-				condition.add_cast_operation({ type::t_bool, 1, 1 });
+				condition_exp.add_cast_operation({ type::t_bool, 1, 1 });
 
-				condition_value = _codegen->emit_load(condition);
+				condition_value = _codegen->emit_load(condition_exp);
 
 				_codegen->leave_block_and_branch_conditional(condition_value, header_label, merge_block);
 			}
@@ -621,7 +708,7 @@ bool reshadefx::parser::parse_statement(bool scoped)
 			_codegen->enter_block(merge_block);
 
 			// Emit structured control flow for a loop statement and connect all basic blocks
-			_codegen->emit_loop(location, condition_value, prev_block, header_label, 0, loop_block, continue_label, loop_control);
+			_codegen->emit_loop(statement_location, condition_value, prev_block, header_label, 0, loop_block, continue_label, loop_control);
 
 			return true;
 		}
@@ -629,7 +716,7 @@ bool reshadefx::parser::parse_statement(bool scoped)
 		if (accept(tokenid::break_))
 		{
 			if (_loop_break_target_stack.empty())
-				return error(location, 3518, "break must be inside loop"), false;
+				return error(statement_location, 3518, "break must be inside loop"), false;
 
 			// Branch to the break target of the inner most loop on the stack
 			_codegen->leave_block_and_branch(_loop_break_target_stack.back(), 1);
@@ -640,7 +727,7 @@ bool reshadefx::parser::parse_statement(bool scoped)
 		if (accept(tokenid::continue_))
 		{
 			if (_loop_continue_target_stack.empty())
-				return error(location, 3519, "continue must be inside loop"), false;
+				return error(statement_location, 3519, "continue must be inside loop"), false;
 
 			// Branch to the continue target of the inner most loop on the stack
 			_codegen->leave_block_and_branch(_loop_continue_target_stack.back(), 2);
@@ -650,37 +737,37 @@ bool reshadefx::parser::parse_statement(bool scoped)
 
 		if (accept(tokenid::return_))
 		{
-			const type &ret_type = _current_function->return_type;
+			const type &return_type = _current_function->return_type;
 
 			if (!peek(';'))
 			{
-				expression expression;
-				if (!parse_expression(expression))
+				expression return_exp;
+				if (!parse_expression(return_exp))
 					return consume_until(';'), false;
 
 				// Cannot return to void
-				if (ret_type.is_void())
+				if (return_type.is_void())
 					// Consume the semicolon that follows the return expression so that parsing may continue
-					return error(location, 3079, "void functions cannot return a value"), accept(';'), false;
+					return error(statement_location, 3079, "void functions cannot return a value"), accept(';'), false;
 
 				// Cannot return arrays from a function
-				if (expression.type.is_array() || !type::rank(expression.type, ret_type))
-					return error(location, 3017, "expression (" + expression.type.description() + ") does not match function return type (" + ret_type.description() + ')'), accept(';'), false;
+				if (return_exp.type.is_array() || !type::rank(return_exp.type, return_type))
+					return error(statement_location, 3017, "expression (" + return_exp.type.description() + ") does not match function return type (" + return_type.description() + ')'), accept(';'), false;
 
 				// Load return value and perform implicit cast to function return type
-				if (expression.type.components() > ret_type.components())
-					warning(expression.location, 3206, "implicit truncation of vector type");
+				if (return_exp.type.components() > return_type.components())
+					warning(return_exp.location, 3206, "implicit truncation of vector type");
 
-				expression.add_cast_operation(ret_type);
+				return_exp.add_cast_operation(return_type);
 
-				const auto return_value = _codegen->emit_load(expression);
+				const codegen::id return_value = _codegen->emit_load(return_exp);
 
 				_codegen->leave_block_and_return(return_value);
 			}
-			else if (!ret_type.is_void())
+			else if (!return_type.is_void())
 			{
 				// No return value was found, but the function expects one
-				error(location, 3080, "function must return a value");
+				error(statement_location, 3080, "function must return a value");
 
 				// Consume the semicolon that follows the return expression so that parsing may continue
 				accept(';');
@@ -705,7 +792,7 @@ bool reshadefx::parser::parse_statement(bool scoped)
 	}
 
 	// Handle variable declarations
-	if (type type; parse_type(type))
+	if (type type = {}; parse_type(type))
 	{
 		unsigned int count = 0;
 		do { // There may be multiple declarations behind a type, so loop through them
@@ -720,7 +807,7 @@ bool reshadefx::parser::parse_statement(bool scoped)
 	}
 
 	// Handle expression statements
-	if (expression expression; parse_expression(expression))
+	if (expression statement_exp; parse_expression(statement_exp))
 		return expect(';'); // A statement has to be terminated with a semicolon
 
 	// Gracefully consume any remaining characters until the statement would usually end, so that parsing may continue despite the error
@@ -777,7 +864,6 @@ bool reshadefx::parser::parse_statement_block(bool scoped)
 bool reshadefx::parser::parse_type(type &type)
 {
 	type.qualifiers = 0;
-
 	accept_type_qualifiers(type);
 
 	if (!accept_type_class(type))
@@ -785,12 +871,12 @@ bool reshadefx::parser::parse_type(type &type)
 
 	if (type.is_integral() && (type.has(type::q_centroid) || type.has(type::q_noperspective)))
 		return error(_token.location, 4576, "signature specifies invalid interpolation mode for integer component type"), false;
-	else if (type.has(type::q_centroid) && !type.has(type::q_noperspective))
+	if (type.has(type::q_centroid) && !type.has(type::q_noperspective))
 		type.qualifiers |= type::q_linear;
 
 	return true;
 }
-bool reshadefx::parser::parse_array_size(type &type)
+bool reshadefx::parser::parse_array_length(type &type)
 {
 	// Reset array length to zero before checking if one exists
 	type.array_length = 0;
@@ -799,18 +885,18 @@ bool reshadefx::parser::parse_array_size(type &type)
 	{
 		if (accept(']'))
 		{
-			// No length expression, so this is an unsized array
-			type.array_length = -1;
+			// No length expression, so this is an unbounded array
+			type.array_length = UINT_MAX;
 		}
-		else if (expression expression; parse_expression(expression) && expect(']'))
+		else if (expression length_exp; parse_expression(length_exp) && expect(']'))
 		{
-			if (!expression.is_constant || !(expression.type.is_scalar() && expression.type.is_integral()))
-				return error(expression.location, 3058, "array dimensions must be literal scalar expressions"), false;
+			if (!length_exp.is_constant || !(length_exp.type.is_scalar() && length_exp.type.is_integral()))
+				return error(length_exp.location, 3058, "array dimensions must be literal scalar expressions"), false;
 
-			type.array_length = expression.constant.as_uint[0];
+			type.array_length = length_exp.constant.as_uint[0];
 
 			if (type.array_length < 1 || type.array_length > 65536)
-				return error(expression.location, 3059, "array dimension must be between 1 and 65536"), false;
+				return error(length_exp.location, 3059, "array dimension must be between 1 and 65536"), false;
 		}
 		else
 		{
@@ -835,21 +921,27 @@ bool reshadefx::parser::parse_annotations(std::vector<annotation> &annotations)
 
 	while (!peek('>'))
 	{
-		if (type type; accept_type_class(type))
+		if (type type /* = {} */; accept_type_class(type))
 			warning(_token.location, 4717, "type prefixes for annotations are deprecated and ignored");
 
 		if (!expect(tokenid::identifier))
 			return consume_until('>'), false;
 
-		auto name = std::move(_token.literal_as_string);
+		std::string name = std::move(_token.literal_as_string);
 
-		if (expression expression; !expect('=') || !parse_expression_multary(expression) || !expect(';'))
+		expression annotation_exp;
+		if (!expect('=') || !parse_expression_multary(annotation_exp) || !expect(';'))
 			return consume_until('>'), false;
-		else if (expression.is_constant)
-			annotations.push_back({ expression.type, std::move(name), std::move(expression.constant) });
+
+		if (annotation_exp.is_constant)
+		{
+			annotations.push_back({ annotation_exp.type, std::move(name), std::move(annotation_exp.constant) });
+		}
 		else // Continue parsing annotations despite this not being a constant, since the syntax is still correct
-			parse_success = false,
-			error(expression.location, 3011, "value must be a literal expression");
+		{
+			parse_success = false;
+			error(annotation_exp.location, 3011, "value must be a literal expression");
+		}
 	}
 
 	return expect('>') && parse_success;
@@ -857,14 +949,14 @@ bool reshadefx::parser::parse_annotations(std::vector<annotation> &annotations)
 
 bool reshadefx::parser::parse_struct()
 {
-	const auto location = std::move(_token.location);
+	const location struct_location = std::move(_token.location);
 
 	struct_info info;
 	// The structure name is optional
 	if (accept(tokenid::identifier))
 		info.name = std::move(_token.literal_as_string);
 	else
-		info.name = "_anonymous_struct_" + std::to_string(location.line) + '_' + std::to_string(location.column);
+		info.name = "_anonymous_struct_" + std::to_string(struct_location.line) + '_' + std::to_string(struct_location.column);
 
 	info.unique_name = 'S' + current_scope().name + info.name;
 	std::replace(info.unique_name.begin(), info.unique_name.end(), ':', '_');
@@ -919,9 +1011,14 @@ bool reshadefx::parser::parse_struct()
 				error(member.location, 3010, '\'' + member.name + "': struct members cannot be declared 'groupshared'");
 
 			// Modify member specific type, so that following members in the declaration list are not affected by this
-			if (!parse_array_size(member.type))
-				return consume_until('}'), accept(';'), false;
-			else if (member.type.array_length < 0)
+			if (!parse_array_length(member.type))
+			{
+				consume_until('}');
+				accept(';');
+				return false;
+			}
+
+			if (member.type.is_unbounded_array())
 				parse_success = false,
 				error(member.location, 3072, '\'' + member.name + "': array dimensions of struct members must be explicit");
 
@@ -958,7 +1055,7 @@ bool reshadefx::parser::parse_struct()
 				}
 			}
 
-			// Save member name and type for book keeping
+			// Save member name and type for bookkeeping
 			info.member_list.push_back(member);
 		} while (!peek(';'));
 
@@ -968,28 +1065,29 @@ bool reshadefx::parser::parse_struct()
 
 	// Empty structures are valid, but not usually intended, so emit a warning
 	if (info.member_list.empty())
-		warning(location, 5001, "struct has no members");
+		warning(struct_location, 5001, "struct has no members");
 
 	// Define the structure now that information about all the member types was gathered
-	const auto id = _codegen->define_struct(location, info);
+	const codegen::id id = _codegen->define_struct(struct_location, info);
 
 	// Insert the symbol into the symbol table
-	const symbol symbol = { symbol_type::structure, id };
+	symbol symbol = { symbol_type::structure, id };
 
 	if (!insert_symbol(info.name, symbol, true))
-		return error(location, 3003, "redefinition of '" + info.name + '\''), false;
+		return error(struct_location, 3003, "redefinition of '" + info.name + '\''), false;
 
 	return expect('}') && parse_success;
 }
 
-bool reshadefx::parser::parse_function(type type, std::string name)
+bool reshadefx::parser::parse_function(type type, std::string name, shader_type stype, int num_threads[3])
 {
-	const auto location = std::move(_token.location);
+	const location function_location = std::move(_token.location);
 
 	if (!expect('(')) // Functions always have a parameter list
 		return false;
+
 	if (type.qualifiers != 0)
-		return error(location, 3047, '\'' + name + "': function return type cannot have any qualifiers"), false;
+		return error(function_location, 3047, '\'' + name + "': function return type cannot have any qualifiers"), false;
 
 	function_info info;
 	info.name = name;
@@ -997,18 +1095,25 @@ bool reshadefx::parser::parse_function(type type, std::string name)
 	std::replace(info.unique_name.begin(), info.unique_name.end(), ':', '_');
 
 	info.return_type = type;
+	info.type = stype;
+	info.num_threads[0] = num_threads[0];
+	info.num_threads[1] = num_threads[1];
+	info.num_threads[2] = num_threads[2];
 	_current_function = &info;
 
 	bool parse_success = true;
 	bool expect_parenthesis = true;
 
-	// Enter function scope (and leave it again when finished parsing this function)
-	enter_scope();
-	on_scope_exit _([this]() {
-		leave_scope();
-		_codegen->leave_function();
-		_current_function = nullptr;
-	});
+	// Enter function scope (and leave it again when parsing this function finished)
+	scope_guard _(
+		[this]() {
+			enter_scope();
+		},
+		[this]() {
+			leave_scope();
+			_codegen->leave_function();
+			_current_function = nullptr;
+		});
 
 	while (!peek(')'))
 	{
@@ -1065,17 +1170,19 @@ bool reshadefx::parser::parse_function(type type, std::string name)
 		else if (!param.type.has(type::q_out))
 			param.type.qualifiers |= type::q_in; // Function parameters are implicitly 'in' if not explicitly defined as 'out'
 
-		if (!parse_array_size(param.type))
+		if (!parse_array_length(param.type))
 		{
 			parse_success = false;
 			expect_parenthesis = false;
 			consume_until(')');
 			break;
 		}
-		else if (param.type.array_length < 0)
+
+		if (param.type.is_unbounded_array())
 		{
 			parse_success = false;
 			error(param.location, 3072, '\'' + param.name + "': array dimensions of function parameters must be explicit");
+			param.type.array_length = 0;
 		}
 
 		// Handle parameter type semantic
@@ -1116,6 +1223,34 @@ bool reshadefx::parser::parse_function(type type, std::string name)
 			}
 		}
 
+		// Handle default argument
+		if (accept('='))
+		{
+			expression default_value_exp;
+			if (!parse_expression_multary(default_value_exp))
+			{
+				parse_success = false;
+				expect_parenthesis = false;
+				consume_until(')');
+				break;
+			}
+
+			default_value_exp.add_cast_operation(param.type);
+
+			if (!default_value_exp.is_constant)
+				parse_success = false,
+				error(default_value_exp.location, 3011, '\'' + param.name + "': value must be a literal expression");
+
+			param.default_value = std::move(default_value_exp.constant);
+			param.has_default_value = true;
+		}
+		else
+		{
+			if (!info.parameter_list.empty() && info.parameter_list.back().has_default_value)
+				parse_success = false,
+				error(param.location, 3044, '\'' + name + "': missing default value for parameter '" + param.name + '\'');
+		}
+
 		info.parameter_list.push_back(std::move(param));
 	}
 
@@ -1127,6 +1262,7 @@ bool reshadefx::parser::parse_function(type type, std::string name)
 	{
 		if (!expect(tokenid::identifier))
 			return false;
+
 		if (type.is_void())
 			return error(_token.location, 3076, '\'' + name + "': void function cannot have a semantic"), false;
 
@@ -1140,17 +1276,17 @@ bool reshadefx::parser::parse_function(type type, std::string name)
 
 	// Check if this is a function declaration without a body
 	if (accept(';'))
-		return error(location, 3510, '\'' + name + "': function is missing an implementation"), false;
+		return error(function_location, 3510, '\'' + name + "': function is missing an implementation"), false;
 
 	// Define the function now that information about the declaration was gathered
-	const auto id = _codegen->define_function(location, info);
+	const codegen::id id = _codegen->define_function(function_location, info);
 
 	// Insert the function and parameter symbols into the symbol table and update current function pointer to the permanent one
 	symbol symbol = { symbol_type::function, id, { type::t_function } };
-	symbol.function = _current_function = &_codegen->find_function(id);
+	symbol.function = _current_function = &_codegen->get_function(id);
 
 	if (!insert_symbol(name, symbol, true))
-		return error(location, 3003, "redefinition of '" + name + '\''), false;
+		return error(function_location, 3003, "redefinition of '" + name + '\''), false;
 
 	for (const struct_member_info &param : info.parameter_list)
 		if (!insert_symbol(param.name, { symbol_type::variable, param.definition, param.type }))
@@ -1171,12 +1307,12 @@ bool reshadefx::parser::parse_function(type type, std::string name)
 
 bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 {
-	const auto location = std::move(_token.location);
+	const location variable_location = std::move(_token.location);
 
 	if (type.is_void())
-		return error(location, 3038, '\'' + name + "': variables cannot be void"), false;
+		return error(variable_location, 3038, '\'' + name + "': variables cannot be void"), false;
 	if (type.has(type::q_in) || type.has(type::q_out))
-		return error(location, 3055, '\'' + name + "': variables cannot be declared 'in' or 'out'"), false;
+		return error(variable_location, 3055, '\'' + name + "': variables cannot be declared 'in' or 'out'"), false;
 
 	// Local and global variables have different requirements
 	if (global)
@@ -1186,23 +1322,23 @@ bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 		{
 			// Global variables that are 'static' cannot be of another storage class
 			if (type.has(type::q_uniform))
-				return error(location, 3007, '\'' + name + "': uniform global variables cannot be declared 'static'"), false;
+				return error(variable_location, 3007, '\'' + name + "': uniform global variables cannot be declared 'static'"), false;
 			// The 'volatile' qualifier is only valid memory object declarations that are storage images or uniform blocks
 			if (type.has(type::q_volatile))
-				return error(location, 3008, '\'' + name + "': global variables cannot be declared 'volatile'"), false;
+				return error(variable_location, 3008, '\'' + name + "': global variables cannot be declared 'volatile'"), false;
 		}
 		else if (!type.has(type::q_groupshared))
 		{
 			// Make all global variables 'uniform' by default, since they should be externally visible without the 'static' keyword
-			if (!type.has(type::q_uniform) && !(type.is_texture() || type.is_sampler() || type.is_storage()))
-				warning(location, 5000, '\'' + name + "': global variables are considered 'uniform' by default");
+			if (!type.has(type::q_uniform) && !type.is_object())
+				warning(variable_location, 5000, '\'' + name + "': global variables are considered 'uniform' by default");
 
 			// Global variables that are not 'static' are always 'extern' and 'uniform'
 			type.qualifiers |= type::q_extern | type::q_uniform;
 
 			// It is invalid to make 'uniform' variables constant, since they can be modified externally
 			if (type.has(type::q_const))
-				return error(location, 3035, '\'' + name + "': variables which are 'uniform' cannot be declared 'const'"), false;
+				return error(variable_location, 3035, '\'' + name + "': variables which are 'uniform' cannot be declared 'const'"), false;
 		}
 	}
 	else
@@ -1212,18 +1348,18 @@ bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 			type.qualifiers &= ~type::q_static;
 
 		if (type.has(type::q_extern))
-			return error(location, 3006, '\'' + name + "': local variables cannot be declared 'extern'"), false;
+			return error(variable_location, 3006, '\'' + name + "': local variables cannot be declared 'extern'"), false;
 		if (type.has(type::q_uniform))
-			return error(location, 3047, '\'' + name + "': local variables cannot be declared 'uniform'"), false;
+			return error(variable_location, 3047, '\'' + name + "': local variables cannot be declared 'uniform'"), false;
 		if (type.has(type::q_groupshared))
-			return error(location, 3010, '\'' + name + "': local variables cannot be declared 'groupshared'"), false;
+			return error(variable_location, 3010, '\'' + name + "': local variables cannot be declared 'groupshared'"), false;
 
-		if (type.is_texture() || type.is_sampler() || type.is_storage())
-			return error(location, 3038, '\'' + name + "': local variables cannot be textures or samplers"), false;
+		if (type.is_object())
+			return error(variable_location, 3038, '\'' + name + "': local variables cannot be texture, sampler or storage objects"), false;
 	}
 
 	// The variable name may be followed by an optional array size expression
-	if (!parse_array_size(type))
+	if (!parse_array_length(type))
 		return false;
 
 	bool parse_success = true;
@@ -1236,7 +1372,8 @@ bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 	{
 		if (!expect(tokenid::identifier))
 			return false;
-		else if (!global) // Only global variables can have a semantic
+
+		if (!global) // Only global variables can have a semantic
 			return error(_token.location, 3043, '\'' + name + "': local variables cannot have semantics"), false;
 
 		std::string &semantic = texture_info.semantic;
@@ -1262,12 +1399,13 @@ bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 
 			if (type.has(type::q_groupshared))
 				return error(initializer.location, 3009, '\'' + name + "': variables declared 'groupshared' cannot have an initializer"), false;
+
 			// TODO: This could be resolved by initializing these at the beginning of the entry point
 			if (global && !initializer.is_constant)
 				return error(initializer.location, 3011, '\'' + name + "': initial value must be a literal expression"), false;
 
 			// Check type compatibility
-			if ((type.array_length >= 0 && initializer.type.array_length != type.array_length) || !type::rank(initializer.type, type))
+			if ((!type.is_unbounded_array() && initializer.type.array_length != type.array_length) || !type::rank(initializer.type, type))
 				return error(initializer.location, 3017, '\'' + name + "': initial value (" + initializer.type.description() + ") does not match variable type (" + type.description() + ')'), false;
 			if ((initializer.type.rows < type.rows || initializer.type.cols < type.cols) && !initializer.type.is_scalar())
 				return error(initializer.location, 3017, '\'' + name + "': cannot implicitly convert these vector types (from " + initializer.type.description() + " to " + type.description() + ')'), false;
@@ -1288,30 +1426,31 @@ bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 		else if (type.is_numeric() || type.is_struct()) // Numeric variables without an initializer need special handling
 		{
 			if (type.has(type::q_const)) // Constants have to have an initial value
-				return error(location, 3012, '\'' + name + "': missing initial value"), false;
-			else if (!type.has(type::q_uniform)) // Zero initialize all global variables
-				initializer.reset_to_rvalue_constant(location, {}, type);
+				return error(variable_location, 3012, '\'' + name + "': missing initial value"), false;
+
+			if (!type.has(type::q_uniform)) // Zero initialize all global variables
+				initializer.reset_to_rvalue_constant(variable_location, {}, type);
 		}
 		else if (global && accept('{')) // Textures and samplers can have a property block attached to their declaration
 		{
 			// Non-numeric variables cannot be constants
 			if (type.has(type::q_const))
-				return error(location, 3035, '\'' + name + "': this variable type cannot be declared 'const'"), false;
+				return error(variable_location, 3035, '\'' + name + "': this variable type cannot be declared 'const'"), false;
 
 			while (!peek('}'))
 			{
 				if (!expect(tokenid::identifier))
 					return consume_until('}'), false;
 
-				const auto property_name = std::move(_token.literal_as_string);
-				const auto property_location = std::move(_token.location);
+				location property_location = std::move(_token.location);
+				const std::string property_name = std::move(_token.literal_as_string);
 
 				if (!expect('='))
 					return consume_until('}'), false;
 
 				backup();
 
-				expression expression;
+				expression property_exp;
 
 				if (accept(tokenid::identifier)) // Handle special enumeration names for property values
 				{
@@ -1321,9 +1460,10 @@ bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 							return static_cast<std::string::value_type>(std::toupper(c));
 						});
 
-					static const std::unordered_map<std::string_view, uint32_t> s_values = {
+					static const std::unordered_map<std::string_view, uint32_t> s_enum_values = {
 						{ "NONE", 0 }, { "POINT", 0 },
 						{ "LINEAR", 1 },
+						{ "ANISOTROPIC", 0x55 },
 						{ "WRAP", uint32_t(texture_address_mode::wrap) }, { "REPEAT", uint32_t(texture_address_mode::wrap) },
 						{ "MIRROR", uint32_t(texture_address_mode::mirror) },
 						{ "CLAMP", uint32_t(texture_address_mode::clamp) },
@@ -1331,6 +1471,8 @@ bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 						{ "R8", uint32_t(texture_format::r8) },
 						{ "R16", uint32_t(texture_format::r16) },
 						{ "R16F", uint32_t(texture_format::r16f) },
+						{ "R32I", uint32_t(texture_format::r32i) },
+						{ "R32U", uint32_t(texture_format::r32u) },
 						{ "R32F", uint32_t(texture_format::r32f) },
 						{ "RG8", uint32_t(texture_format::rg8) }, { "R8G8", uint32_t(texture_format::rg8) },
 						{ "RG16", uint32_t(texture_format::rg16) }, { "R16G16", uint32_t(texture_format::rg16) },
@@ -1344,80 +1486,99 @@ bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 					};
 
 					// Look up identifier in list of possible enumeration names
-					if (const auto it = s_values.find(_token.literal_as_string);
-						it != s_values.end())
-						expression.reset_to_rvalue_constant(_token.location, it->second);
+					if (const auto it = s_enum_values.find(_token.literal_as_string);
+						it != s_enum_values.end())
+						property_exp.reset_to_rvalue_constant(_token.location, it->second);
 					else // No match found, so rewind to parser state before the identifier was consumed and try parsing it as a normal expression
 						restore();
 				}
 
 				// Parse right hand side as normal expression if no special enumeration name was matched already
-				if (!expression.is_constant && !parse_expression_multary(expression))
+				if (!property_exp.is_constant && !parse_expression_multary(property_exp))
 					return consume_until('}'), false;
 
 				if (property_name == "Texture")
 				{
 					// Ignore invalid symbols that were added during error recovery
-					if (expression.base == 0xFFFFFFFF)
+					if (property_exp.base == UINT32_MAX)
 						return consume_until('}'), false;
 
-					if (!expression.type.is_texture())
-						return error(expression.location, 3020, "type mismatch, expected texture name"), consume_until('}'), false;
+					if (!property_exp.type.is_texture())
+						return error(property_exp.location, 3020, "type mismatch, expected texture name"), consume_until('}'), false;
 
-					reshadefx::texture_info &target_info = _codegen->find_texture(expression.base);
-					if (type.is_storage())
-						// Texture is used as storage
-						target_info.storage_access = true;
+					if (type.is_sampler() || type.is_storage())
+					{
+						struct texture_info &target_info = _codegen->get_texture(property_exp.base);
+						if (type.is_storage())
+							// Texture is used as storage
+							target_info.storage_access = true;
 
-					texture_info = target_info;
-					sampler_info.texture_name = target_info.unique_name;
-					storage_info.texture_name = target_info.unique_name;
+						texture_info = target_info;
+						sampler_info.texture_name = target_info.unique_name;
+						storage_info.texture_name = target_info.unique_name;
+					}
 				}
 				else
 				{
-					if (!expression.is_constant || !expression.type.is_scalar())
-						return error(expression.location, 3538, "value must be a literal scalar expression"), consume_until('}'), false;
+					if (!property_exp.is_constant || !property_exp.type.is_scalar())
+						return error(property_exp.location, 3538, "value must be a literal scalar expression"), consume_until('}'), false;
 
 					// All states below expect the value to be of an integer type
-					expression.add_cast_operation({ type::t_int, 1, 1 });
-					const int value = expression.constant.as_int[0];
+					property_exp.add_cast_operation({ type::t_int, 1, 1 });
+					const int value = property_exp.constant.as_int[0];
 
 					if (value < 0) // There is little use for negative values, so warn in those cases
-						warning(expression.location, 3571, "negative value specified for property '" + property_name + '\'');
+						warning(property_exp.location, 3571, "negative value specified for property '" + property_name + '\'');
 
-					if (property_name == "Width")
-						texture_info.width  = value > 0 ? value : 1;
-					else if (property_name == "Height")
-						texture_info.height = value > 0 ? value : 1;
-					else if (property_name == "MipLevels")
-						texture_info.levels = value > 0 && value <= std::numeric_limits<uint16_t>::max() ?
-							static_cast<uint16_t>(value) : 1; // Also ensures negative values do not cause problems
-					else if (property_name == "Format")
-						texture_info.format = static_cast<texture_format>(value);
-					else if (property_name == "SRGBTexture" || property_name == "SRGBReadEnable")
-						sampler_info.srgb = value != 0;
-					else if (property_name == "AddressU")
-						sampler_info.address_u = static_cast<texture_address_mode>(value);
-					else if (property_name == "AddressV")
-						sampler_info.address_v = static_cast<texture_address_mode>(value);
-					else if (property_name == "AddressW")
-						sampler_info.address_w = static_cast<texture_address_mode>(value);
-					else if (property_name == "MinFilter")
-						sampler_info.filter = static_cast<filter_mode>((uint32_t(sampler_info.filter) & 0x0F) | ((value << 4) & 0x30)); // Combine sampler filter components into a single filter enumeration value
-					else if (property_name == "MagFilter")
-						sampler_info.filter = static_cast<filter_mode>((uint32_t(sampler_info.filter) & 0x33) | ((value << 2) & 0x0C));
-					else if (property_name == "MipFilter")
-						sampler_info.filter = static_cast<filter_mode>((uint32_t(sampler_info.filter) & 0x3C) |  (value       & 0x03));
-					else if (property_name == "MinLOD" || property_name == "MaxMipLevel")
-						sampler_info.min_lod = static_cast<float>(value);
-					else if (property_name == "MaxLOD")
-						sampler_info.max_lod = static_cast<float>(value);
-					else if (property_name == "MipLODBias" || property_name == "MipMapLodBias")
-						sampler_info.lod_bias = static_cast<float>(value);
-					else if (property_name == "MipLOD" || property_name == "MipLevel")
-						storage_info.level = value > 0 && value < std::numeric_limits<uint16_t>::max() ? static_cast<uint16_t>(value) : 0;
-					else
-						return error(property_location, 3004, "unrecognized property '" + property_name + '\''), consume_until('}'), false;
+					if (type.is_texture())
+					{
+						if (property_name == "Width")
+							texture_info.width = value > 0 ? value : 1;
+						else if (type.texture_dimension() >= 2 && property_name == "Height")
+							texture_info.height = value > 0 ? value : 1;
+						else if (type.texture_dimension() >= 3 && property_name == "Depth")
+							texture_info.depth = value > 0 && value <= std::numeric_limits<uint16_t>::max() ? static_cast<uint16_t>(value) : 1;
+						else if (property_name == "MipLevels")
+							// Also ensures negative values do not cause problems
+							texture_info.levels = value > 0 && value <= std::numeric_limits<uint16_t>::max() ? static_cast<uint16_t>(value) : 1;
+						else if (property_name == "Format")
+							texture_info.format = static_cast<texture_format>(value);
+						else
+							return error(property_location, 3004, "unrecognized property '" + property_name + '\''), consume_until('}'), false;
+					}
+					else if (type.is_sampler())
+					{
+						if (property_name == "SRGBTexture" || property_name == "SRGBReadEnable")
+							sampler_info.srgb = value != 0;
+						else if (property_name == "AddressU")
+							sampler_info.address_u = static_cast<texture_address_mode>(value);
+						else if (property_name == "AddressV")
+							sampler_info.address_v = static_cast<texture_address_mode>(value);
+						else if (property_name == "AddressW")
+							sampler_info.address_w = static_cast<texture_address_mode>(value);
+						else if (property_name == "MinFilter")
+							// Combine sampler filter components into a single filter enumeration value
+							sampler_info.filter = static_cast<filter_mode>((uint32_t(sampler_info.filter) & 0x4F) | ((value & 0x03) << 4) | (value & 0x40));
+						else if (property_name == "MagFilter")
+							sampler_info.filter = static_cast<filter_mode>((uint32_t(sampler_info.filter) & 0x73) | ((value & 0x03) << 2) | (value & 0x40));
+						else if (property_name == "MipFilter")
+							sampler_info.filter = static_cast<filter_mode>((uint32_t(sampler_info.filter) & 0x7C) | ((value & 0x03)     ) | (value & 0x40));
+						else if (property_name == "MinLOD" || property_name == "MaxMipLevel")
+							sampler_info.min_lod = static_cast<float>(value);
+						else if (property_name == "MaxLOD")
+							sampler_info.max_lod = static_cast<float>(value);
+						else if (property_name == "MipLODBias" || property_name == "MipMapLodBias")
+							sampler_info.lod_bias = static_cast<float>(value);
+						else
+							return error(property_location, 3004, "unrecognized property '" + property_name + '\''), consume_until('}'), false;
+					}
+					else if (type.is_storage())
+					{
+						if (property_name == "MipLOD" || property_name == "MipLevel")
+							storage_info.level = value > 0 && value < std::numeric_limits<uint16_t>::max() ? static_cast<uint16_t>(value) : 0;
+						else
+							return error(property_location, 3004, "unrecognized property '" + property_name + '\''), consume_until('}'), false;
+					}
 				}
 
 				if (!expect(';'))
@@ -1430,8 +1591,8 @@ bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 	}
 
 	// At this point the array size should be known (either from the declaration or the initializer)
-	if (type.array_length < 0)
-		return error(location, 3074, '\'' + name + "': implicit array missing initial value"), false;
+	if (type.is_unbounded_array())
+		return error(variable_location, 3074, '\'' + name + "': implicit array missing initial value"), false;
 
 	symbol symbol;
 
@@ -1447,6 +1608,8 @@ bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 		assert(global);
 
 		texture_info.name = name;
+		texture_info.type = static_cast<texture_type>(type.texture_dimension());
+
 		// Add namespace scope to avoid name clashes
 		texture_info.unique_name = 'V' + current_scope().name + name;
 		std::replace(texture_info.unique_name.begin(), texture_info.unique_name.end(), ':', '_');
@@ -1454,7 +1617,7 @@ bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 		texture_info.annotations = std::move(sampler_info.annotations);
 
 		symbol = { symbol_type::variable, 0, type };
-		symbol.id = _codegen->define_texture(location, texture_info);
+		symbol.id = _codegen->define_texture(variable_location, texture_info);
 	}
 	// Samplers are actually combined image samplers
 	else if (type.is_sampler())
@@ -1462,36 +1625,57 @@ bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 		assert(global);
 
 		if (sampler_info.texture_name.empty())
-			return error(location, 3012, '\'' + name + "': missing 'Texture' property"), false;
+			return error(variable_location, 3012, '\'' + name + "': missing 'Texture' property"), false;
+		if (type.texture_dimension() != static_cast<unsigned int>(texture_info.type))
+			return error(variable_location, 3521, '\'' + name + "': type mismatch between texture and sampler type"), false;
 		if (sampler_info.srgb && texture_info.format != texture_format::rgba8)
-			return error(location, 4582, '\'' + name + "': texture does not support sRGB sampling (only textures with RGBA8 format do)"), false;
+			return error(variable_location, 4582, '\'' + name + "': texture does not support sRGB sampling (only textures with RGBA8 format do)"), false;
+
+		if (texture_info.format == texture_format::r32i ?
+				!type.is_integral() || !type.is_signed() :
+			texture_info.format == texture_format::r32u ?
+				!type.is_integral() || !type.is_unsigned() :
+				!type.is_floating_point())
+			return error(variable_location, 4582, '\'' + name + "': type mismatch between texture format and sampler element type"), false;
 
 		sampler_info.name = name;
+		sampler_info.type = type;
+
 		// Add namespace scope to avoid name clashes
 		sampler_info.unique_name = 'V' + current_scope().name + name;
 		std::replace(sampler_info.unique_name.begin(), sampler_info.unique_name.end(), ':', '_');
 
 		symbol = { symbol_type::variable, 0, type };
-		symbol.id = _codegen->define_sampler(location, sampler_info);
+		symbol.id = _codegen->define_sampler(variable_location, texture_info, sampler_info);
 	}
 	else if (type.is_storage())
 	{
 		assert(global);
 
 		if (storage_info.texture_name.empty())
-			return error(location, 3012, '\'' + name + "': missing 'Texture' property"), false;
+			return error(variable_location, 3012, '\'' + name + "': missing 'Texture' property"), false;
+		if (type.texture_dimension() != static_cast<unsigned int>(texture_info.type))
+			return error(variable_location, 3521, '\'' + name + "': type mismatch between texture and storage type"), false;
+
+		if (texture_info.format == texture_format::r32i ?
+				!type.is_integral() || !type.is_signed() :
+			texture_info.format == texture_format::r32u ?
+				!type.is_integral() || !type.is_unsigned() :
+				!type.is_floating_point())
+			return error(variable_location, 4582, '\'' + name + "': type mismatch between texture format and storage element type"), false;
 
 		storage_info.name = name;
+		storage_info.type = type;
+
 		// Add namespace scope to avoid name clashes
 		storage_info.unique_name = 'V' + current_scope().name + name;
 		std::replace(storage_info.unique_name.begin(), storage_info.unique_name.end(), ':', '_');
 
-		storage_info.format = texture_info.format;
 		if (storage_info.level > texture_info.levels - 1)
 			storage_info.level = texture_info.levels - 1;
 
 		symbol = { symbol_type::variable, 0, type };
-		symbol.id = _codegen->define_storage(location, storage_info);
+		symbol.id = _codegen->define_storage(variable_location, texture_info, storage_info);
 	}
 	// Uniform variables are put into a global uniform buffer structure
 	else if (type.has(type::q_uniform))
@@ -1508,7 +1692,7 @@ bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 		uniform_info.has_initializer_value = initializer.is_constant;
 
 		symbol = { symbol_type::variable, 0, type };
-		symbol.id = _codegen->define_uniform(location, uniform_info);
+		symbol.id = _codegen->define_uniform(variable_location, uniform_info);
 	}
 	// All other variables are separate entities
 	else
@@ -1518,14 +1702,14 @@ bool reshadefx::parser::parse_variable(type type, std::string name, bool global)
 		std::replace(unique_name.begin(), unique_name.end(), ':', '_');
 
 		symbol = { symbol_type::variable, 0, type };
-		symbol.id = _codegen->define_variable(location, type, std::move(unique_name), global,
+		symbol.id = _codegen->define_variable(variable_location, type, std::move(unique_name), global,
 			// Shared variables cannot have an initializer
 			type.has(type::q_groupshared) ? 0 : _codegen->emit_load(initializer));
 	}
 
 	// Insert the symbol into the symbol table
 	if (!insert_symbol(name, symbol, global))
-		return error(location, 3003, "redefinition of '" + name + '\''), false;
+		return error(variable_location, 3003, "redefinition of '" + name + '\''), false;
 
 	return parse_success;
 }
@@ -1554,7 +1738,7 @@ bool reshadefx::parser::parse_technique()
 		}
 	}
 
-	_codegen->define_technique(info);
+	_codegen->define_technique(std::move(info));
 
 	return expect('}') && parse_success;
 }
@@ -1563,7 +1747,7 @@ bool reshadefx::parser::parse_technique_pass(pass_info &info)
 	if (!expect(tokenid::pass))
 		return false;
 
-	const auto pass_location = std::move(_token.location);
+	const location pass_location = std::move(_token.location);
 
 	// Passes can have an optional name
 	if (accept(tokenid::identifier))
@@ -1571,7 +1755,7 @@ bool reshadefx::parser::parse_technique_pass(pass_info &info)
 
 	bool parse_success = true;
 	bool targets_support_srgb = true;
-	function_info vs_info, ps_info, cs_info;
+	function_info vs_info = {}, ps_info = {}, cs_info = {};
 
 	if (!expect('{'))
 		return false;
@@ -1582,14 +1766,14 @@ bool reshadefx::parser::parse_technique_pass(pass_info &info)
 		if (!expect(tokenid::identifier))
 			return consume_until('}'), false;
 
-		auto location = std::move(_token.location);
-		const auto state = std::move(_token.literal_as_string);
+		location state_location = std::move(_token.location);
+		const std::string state_name = std::move(_token.literal_as_string);
 
 		if (!expect('='))
 			return consume_until('}'), false;
 
-		const bool is_shader_state = state == "VertexShader" || state == "PixelShader" || state == "ComputeShader";
-		const bool is_texture_state = state.compare(0, 12, "RenderTarget") == 0 && (state.size() == 12 || (state[12] >= '0' && state[12] < '8'));
+		const bool is_shader_state = state_name.size() > 6 && state_name.compare(state_name.size() - 6, 6, "Shader") == 0; // VertexShader, PixelShader, ComputeShader, ...
+		const bool is_texture_state = state_name.compare(0, 12, "RenderTarget") == 0 && (state_name.size() == 12 || (state_name[12] >= '0' && state_name[12] < '8'));
 
 		// Shader and render target assignment looks up values in the symbol table, so handle those separately from the other states
 		if (is_shader_state || is_texture_state)
@@ -1599,9 +1783,9 @@ bool reshadefx::parser::parse_technique_pass(pass_info &info)
 			if (!accept_symbol(identifier, symbol))
 				return consume_until('}'), false;
 
-			location = std::move(_token.location);
+			state_location = std::move(_token.location);
 
-			int num_threads[3] = { 1, 1, 1 };
+			int num_threads[3] = { 0, 0, 0 };
 			if (accept('<'))
 			{
 				expression x, y, z;
@@ -1631,36 +1815,70 @@ bool reshadefx::parser::parse_technique_pass(pass_info &info)
 			}
 
 			// Ignore invalid symbols that were added during error recovery
-			if (symbol.id != 0xFFFFFFFF)
+			if (symbol.id != UINT32_MAX)
 			{
 				if (is_shader_state)
 				{
 					if (!symbol.id)
 						parse_success = false,
-						error(location, 3501, "undeclared identifier '" + identifier + "', expected function name");
+						error(state_location, 3501, "undeclared identifier '" + identifier + "', expected function name");
 					else if (!symbol.type.is_function())
 						parse_success = false,
-						error(location, 3020, "type mismatch, expected function name");
+						error(state_location, 3020, "type mismatch, expected function name");
 					else {
 						// Look up the matching function info for this function definition
-						function_info &function_info = _codegen->find_function(symbol.id);
+						function_info &function_info = _codegen->get_function(symbol.id);
 
 						// We potentially need to generate a special entry point function which translates between function parameters and input/output variables
-						switch (state[0])
+						switch (state_name[0])
 						{
 						case 'V':
 							vs_info = function_info;
-							_codegen->define_entry_point(vs_info, shader_type::vs);
+							if (vs_info.type != shader_type::unknown && vs_info.type != shader_type::vertex)
+							{
+								parse_success = false;
+								error(state_location, 3020, "type mismatch, expected vertex shader function");
+								break;
+							}
+							vs_info.type = shader_type::vertex;
+							_codegen->define_entry_point(vs_info);
 							info.vs_entry_point = vs_info.unique_name;
 							break;
 						case 'P':
 							ps_info = function_info;
-							_codegen->define_entry_point(ps_info, shader_type::ps);
+							if (ps_info.type != shader_type::unknown && ps_info.type != shader_type::pixel)
+							{
+								parse_success = false;
+								error(state_location, 3020, "type mismatch, expected pixel shader function");
+								break;
+							}
+							ps_info.type = shader_type::pixel;
+							_codegen->define_entry_point(ps_info);
 							info.ps_entry_point = ps_info.unique_name;
 							break;
 						case 'C':
 							cs_info = function_info;
-							_codegen->define_entry_point(cs_info, shader_type::cs, num_threads);
+							if (cs_info.type != shader_type::unknown && cs_info.type != shader_type::compute)
+							{
+								parse_success = false;
+								error(state_location, 3020, "type mismatch, expected compute shader function");
+								break;
+							}
+							cs_info.type = shader_type::compute;
+							// Only use number of threads from pass when specified, otherwise fall back to number specified on the function definition with an attribute
+							if (num_threads[0] != 0)
+							{
+								cs_info.num_threads[0] = num_threads[0];
+								cs_info.num_threads[1] = num_threads[1];
+								cs_info.num_threads[2] = num_threads[2];
+							}
+							else
+							{
+								cs_info.num_threads[0] = std::max(cs_info.num_threads[0], 1);
+								cs_info.num_threads[1] = std::max(cs_info.num_threads[1], 1);
+								cs_info.num_threads[2] = std::max(cs_info.num_threads[2], 1);
+							}
+							_codegen->define_entry_point(cs_info);
 							info.cs_entry_point = cs_info.unique_name;
 							break;
 						}
@@ -1672,29 +1890,41 @@ bool reshadefx::parser::parse_technique_pass(pass_info &info)
 
 					if (!symbol.id)
 						parse_success = false,
-						error(location, 3004, "undeclared identifier '" + identifier + "', expected texture name");
+						error(state_location, 3004, "undeclared identifier '" + identifier + "', expected texture name");
 					else if (!symbol.type.is_texture())
 						parse_success = false,
-						error(location, 3020, "type mismatch, expected texture name");
+						error(state_location, 3020, "type mismatch, expected texture name");
+					else if (symbol.type.texture_dimension() != 2)
+						parse_success = false,
+						error(state_location, 3020, "cannot use texture" + std::to_string(symbol.type.texture_dimension()) + "D as render target");
 					else {
-						reshadefx::texture_info &target_info = _codegen->find_texture(symbol.id);
-						// Texture is used as a render target
-						target_info.render_target = true;
+						struct texture_info &target_info = _codegen->get_texture(symbol.id);
 
-						// Verify that all render targets in this pass have the same dimensions
-						if (info.viewport_width != 0 && info.viewport_height != 0 && (target_info.width != info.viewport_width || target_info.height != info.viewport_height))
-							parse_success = false,
-							error(location, 4545, "cannot use multiple render targets with different texture dimensions (is " + std::to_string(target_info.width) + 'x' + std::to_string(target_info.height) + ", but expected " + std::to_string(info.viewport_width) + 'x' + std::to_string(info.viewport_height) + ')');
+						if (target_info.semantic.empty())
+						{
+							// Texture is used as a render target
+							target_info.render_target = true;
 
-						info.viewport_width = target_info.width;
-						info.viewport_height = target_info.height;
+							// Verify that all render targets in this pass have the same dimensions
+							if (info.viewport_width != 0 && info.viewport_height != 0 && (target_info.width != info.viewport_width || target_info.height != info.viewport_height))
+								parse_success = false,
+								error(state_location, 4545, "cannot use multiple render targets with different texture dimensions (is " + std::to_string(target_info.width) + 'x' + std::to_string(target_info.height) + ", but expected " + std::to_string(info.viewport_width) + 'x' + std::to_string(info.viewport_height) + ')');
 
-						const auto target_index = state.size() > 12 ? (state[12] - '0') : 0;
-						info.render_target_names[target_index] = target_info.unique_name;
+							info.viewport_width = target_info.width;
+							info.viewport_height = target_info.height;
 
-						// Only RGBA8 format supports sRGB writes across all APIs
-						if (target_info.format != texture_format::rgba8)
-							targets_support_srgb = false;
+							const int target_index = state_name.size() > 12 ? (state_name[12] - '0') : 0;
+							info.render_target_names[target_index] = target_info.unique_name;
+
+							// Only RGBA8 format supports sRGB writes across all APIs
+							if (target_info.format != texture_format::rgba8)
+								targets_support_srgb = false;
+						}
+						else
+						{
+							parse_success = false;
+							error(state_location, 3020, "cannot use texture with semantic as render target");
+						}
 					}
 				}
 			}
@@ -1707,7 +1937,7 @@ bool reshadefx::parser::parse_technique_pass(pass_info &info)
 		{
 			backup();
 
-			expression expression;
+			expression state_exp;
 
 			if (accept(tokenid::identifier)) // Handle special enumeration names for pass states
 			{
@@ -1721,24 +1951,24 @@ bool reshadefx::parser::parse_technique_pass(pass_info &info)
 					{ "NONE", 0 }, { "ZERO", 0 }, { "ONE", 1 },
 					{ "ADD", uint32_t(pass_blend_op::add) },
 					{ "SUBTRACT", uint32_t(pass_blend_op::subtract) },
-					{ "REVSUBTRACT", uint32_t(pass_blend_op::rev_subtract) },
+					{ "REVSUBTRACT", uint32_t(pass_blend_op::reverse_subtract) },
 					{ "MIN", uint32_t(pass_blend_op::min) },
 					{ "MAX", uint32_t(pass_blend_op::max) },
-					{ "SRCCOLOR", uint32_t(pass_blend_func::src_color) },
-					{ "SRCALPHA", uint32_t(pass_blend_func::src_alpha) },
-					{ "INVSRCCOLOR", uint32_t(pass_blend_func::inv_src_color) },
-					{ "INVSRCALPHA", uint32_t(pass_blend_func::inv_src_alpha) },
-					{ "DESTCOLOR", uint32_t(pass_blend_func::dst_color) },
-					{ "DESTALPHA", uint32_t(pass_blend_func::dst_alpha) },
-					{ "INVDESTCOLOR", uint32_t(pass_blend_func::inv_dst_color) },
-					{ "INVDESTALPHA", uint32_t(pass_blend_func::inv_dst_alpha) },
+					{ "SRCCOLOR", uint32_t(pass_blend_factor::source_color) },
+					{ "INVSRCCOLOR", uint32_t(pass_blend_factor::one_minus_source_color) },
+					{ "DESTCOLOR", uint32_t(pass_blend_factor::dest_color) },
+					{ "INVDESTCOLOR", uint32_t(pass_blend_factor::one_minus_dest_color) },
+					{ "SRCALPHA", uint32_t(pass_blend_factor::source_alpha) },
+					{ "INVSRCALPHA", uint32_t(pass_blend_factor::one_minus_source_alpha) },
+					{ "DESTALPHA", uint32_t(pass_blend_factor::dest_alpha) },
+					{ "INVDESTALPHA", uint32_t(pass_blend_factor::one_minus_dest_alpha) },
 					{ "KEEP", uint32_t(pass_stencil_op::keep) },
 					{ "REPLACE", uint32_t(pass_stencil_op::replace) },
 					{ "INVERT", uint32_t(pass_stencil_op::invert) },
-					{ "INCR", uint32_t(pass_stencil_op::incr) },
-					{ "INCRSAT", uint32_t(pass_stencil_op::incr_sat) },
-					{ "DECR", uint32_t(pass_stencil_op::decr) },
-					{ "DECRSAT", uint32_t(pass_stencil_op::decr_sat) },
+					{ "INCR", uint32_t(pass_stencil_op::increment) },
+					{ "INCRSAT", uint32_t(pass_stencil_op::increment_saturate) },
+					{ "DECR", uint32_t(pass_stencil_op::decrement) },
+					{ "DECRSAT", uint32_t(pass_stencil_op::decrement_saturate) },
 					{ "NEVER", uint32_t(pass_stencil_func::never) },
 					{ "EQUAL", uint32_t(pass_stencil_func::equal) },
 					{ "NEQUAL", uint32_t(pass_stencil_func::not_equal) }, { "NOTEQUAL", uint32_t(pass_stencil_func::not_equal)  },
@@ -1760,76 +1990,78 @@ bool reshadefx::parser::parse_technique_pass(pass_info &info)
 				// Look up identifier in list of possible enumeration names
 				if (const auto it = s_enum_values.find(_token.literal_as_string);
 					it != s_enum_values.end())
-					expression.reset_to_rvalue_constant(_token.location, it->second);
+					state_exp.reset_to_rvalue_constant(_token.location, it->second);
 				else // No match found, so rewind to parser state before the identifier was consumed and try parsing it as a normal expression
 					restore();
 			}
 
 			// Parse right hand side as normal expression if no special enumeration name was matched already
-			if (!expression.is_constant && !parse_expression_multary(expression))
+			if (!state_exp.is_constant && !parse_expression_multary(state_exp))
 				return consume_until('}'), false;
-			else if (!expression.is_constant || !expression.type.is_scalar())
+
+			if (!state_exp.is_constant || !state_exp.type.is_scalar())
 				parse_success = false,
-				error(expression.location, 3011, "pass state value must be a literal scalar expression");
+				error(state_exp.location, 3011, "pass state value must be a literal scalar expression");
 
 			// All states below expect the value to be of an unsigned integer type
-			expression.add_cast_operation({ type::t_uint, 1, 1 });
-			const unsigned int value = expression.constant.as_uint[0];
+			state_exp.add_cast_operation({ type::t_uint, 1, 1 });
+			const unsigned int value = state_exp.constant.as_uint[0];
 
 #define SET_STATE_VALUE_INDEXED(name, info_name, value) \
-	else if (constexpr size_t name##_len = sizeof(#name) - 1; state.compare(0, name##_len, #name) == 0 && (state.size() == name##_len || (state[name##_len] >= '0' && state[name##_len] < ('0' + static_cast<char>(std::size(info.info_name)))))) \
+	else if (constexpr size_t name##_len = sizeof(#name) - 1; state_name.compare(0, name##_len, #name) == 0 && \
+		(state_name.size() == name##_len || (state_name[name##_len] >= '0' && state_name[name##_len] < ('0' + static_cast<char>(std::size(info.info_name)))))) \
 	{ \
-		if (state.size() != name##_len) \
-			info.info_name[state[name##_len] - '0'] = (value); \
+		if (state_name.size() != name##_len) \
+			info.info_name[state_name[name##_len] - '0'] = (value); \
 		else \
 			for (int i = 0; i < static_cast<int>(std::size(info.info_name)); ++i) \
 				info.info_name[i] = (value); \
 	}
 
-			if (state == "SRGBWriteEnable")
+			if (state_name == "SRGBWriteEnable")
 				info.srgb_write_enable = (value != 0);
 			SET_STATE_VALUE_INDEXED(BlendEnable, blend_enable, value != 0)
-			else if (state == "StencilEnable")
+			else if (state_name == "StencilEnable")
 				info.stencil_enable = (value != 0);
-			else if (state == "ClearRenderTargets")
+			else if (state_name == "ClearRenderTargets")
 				info.clear_render_targets = (value != 0);
 			SET_STATE_VALUE_INDEXED(ColorWriteMask, color_write_mask, value & 0xFF)
 			SET_STATE_VALUE_INDEXED(RenderTargetWriteMask, color_write_mask, value & 0xFF)
-			else if (state == "StencilReadMask" || state == "StencilMask")
+			else if (state_name == "StencilReadMask" || state_name == "StencilMask")
 				info.stencil_read_mask = value & 0xFF;
-			else if (state == "StencilWriteMask")
+			else if (state_name == "StencilWriteMask")
 				info.stencil_write_mask = value & 0xFF;
 			SET_STATE_VALUE_INDEXED(BlendOp, blend_op, static_cast<pass_blend_op>(value))
 			SET_STATE_VALUE_INDEXED(BlendOpAlpha, blend_op_alpha, static_cast<pass_blend_op>(value))
-			SET_STATE_VALUE_INDEXED(SrcBlend, src_blend, static_cast<pass_blend_func>(value))
-			SET_STATE_VALUE_INDEXED(SrcBlendAlpha, src_blend_alpha, static_cast<pass_blend_func>(value))
-			SET_STATE_VALUE_INDEXED(DestBlend, dest_blend, static_cast<pass_blend_func>(value))
-			SET_STATE_VALUE_INDEXED(DestBlendAlpha, dest_blend_alpha, static_cast<pass_blend_func>(value))
-			else if (state == "StencilFunc")
+			SET_STATE_VALUE_INDEXED(SrcBlend, src_blend, static_cast<pass_blend_factor>(value))
+			SET_STATE_VALUE_INDEXED(SrcBlendAlpha, src_blend_alpha, static_cast<pass_blend_factor>(value))
+			SET_STATE_VALUE_INDEXED(DestBlend, dest_blend, static_cast<pass_blend_factor>(value))
+			SET_STATE_VALUE_INDEXED(DestBlendAlpha, dest_blend_alpha, static_cast<pass_blend_factor>(value))
+			else if (state_name == "StencilFunc")
 				info.stencil_comparison_func = static_cast<pass_stencil_func>(value);
-			else if (state == "StencilRef")
+			else if (state_name == "StencilRef")
 				info.stencil_reference_value = value;
-			else if (state == "StencilPass" || state == "StencilPassOp")
+			else if (state_name == "StencilPass" || state_name == "StencilPassOp")
 				info.stencil_op_pass = static_cast<pass_stencil_op>(value);
-			else if (state == "StencilFail" || state == "StencilFailOp")
+			else if (state_name == "StencilFail" || state_name == "StencilFailOp")
 				info.stencil_op_fail = static_cast<pass_stencil_op>(value);
-			else if (state == "StencilZFail" || state == "StencilDepthFail" || state == "StencilDepthFailOp")
+			else if (state_name == "StencilZFail" || state_name == "StencilDepthFail" || state_name == "StencilDepthFailOp")
 				info.stencil_op_depth_fail = static_cast<pass_stencil_op>(value);
-			else if (state == "VertexCount")
+			else if (state_name == "VertexCount")
 				info.num_vertices = value;
-			else if (state == "PrimitiveType" || state == "PrimitiveTopology")
+			else if (state_name == "PrimitiveType" || state_name == "PrimitiveTopology")
 				info.topology = static_cast<primitive_topology>(value);
-			else if (state == "DispatchSizeX")
+			else if (state_name == "DispatchSizeX")
 				info.viewport_width = value;
-			else if (state == "DispatchSizeY")
+			else if (state_name == "DispatchSizeY")
 				info.viewport_height = value;
-			else if (state == "DispatchSizeZ")
+			else if (state_name == "DispatchSizeZ")
 				info.viewport_dispatch_z = value;
-			else if (state == "GenerateMipmaps" || state == "GenerateMipMaps")
+			else if (state_name == "GenerateMipmaps" || state_name == "GenerateMipMaps")
 				info.generate_mipmaps = (value != 0);
 			else
 				parse_success = false,
-				error(location, 3004, "unrecognized pass state '" + state + '\'');
+				error(state_location, 3004, "unrecognized pass state '" + state_name + '\'');
 
 #undef SET_STATE_VALUE_INDEXED
 		}
@@ -1851,24 +2083,21 @@ bool reshadefx::parser::parse_technique_pass(pass_info &info)
 			if (!info.vs_entry_point.empty())
 				warning(pass_location, 3089, "pass is specifying both 'VertexShader' and 'ComputeShader' which cannot be used together");
 			if (!info.ps_entry_point.empty())
-				warning(pass_location, 3089,  "pass is specifying both 'PixelShader' and 'ComputeShader' which cannot be used together");
+				warning(pass_location, 3089, "pass is specifying both 'PixelShader' and 'ComputeShader' which cannot be used together");
 
 			for (codegen::id id : cs_info.referenced_samplers)
-				info.samplers.push_back(_codegen->find_sampler(id));
+				info.samplers.push_back(_codegen->get_sampler(id));
 			for (codegen::id id : cs_info.referenced_storages)
-				info.storages.push_back(_codegen->find_storage(id));
-		}
-		else if (info.vs_entry_point.empty() || info.ps_entry_point.empty())
-		{
-			parse_success = false;
-
-			if (info.vs_entry_point.empty())
-				error(pass_location, 3012, "pass is missing 'VertexShader' property");
-			if (info.ps_entry_point.empty())
-				error(pass_location, 3012,  "pass is missing 'PixelShader' property");
+				info.storages.push_back(_codegen->get_storage(id));
 		}
 		else
 		{
+			if (info.vs_entry_point.empty())
+			{
+				parse_success = false;
+				error(pass_location, 3012, "pass is missing 'VertexShader' property");
+			}
+
 			// Verify that shader signatures between VS and PS match (both semantics and interpolation qualifiers)
 			std::unordered_map<std::string_view, type> vs_semantic_mapping;
 			if (vs_info.return_semantic.empty())
@@ -1936,21 +2165,30 @@ bool reshadefx::parser::parse_technique_pass(pass_info &info)
 				}
 			}
 
-			for (codegen::id id : vs_info.referenced_samplers)
-				info.samplers.push_back(_codegen->find_sampler(id));
-			for (codegen::id id : ps_info.referenced_samplers)
-				info.samplers.push_back(_codegen->find_sampler(id));
+			std::unordered_set<uint32_t> referenced_samplers = std::move(vs_info.referenced_samplers);
+			referenced_samplers.insert(ps_info.referenced_samplers.begin(), ps_info.referenced_samplers.end());
+			for (codegen::id id : referenced_samplers)
+			{
+				const sampler_info &sampler = _codegen->get_sampler(id);
+				if (std::find(std::begin(info.render_target_names), std::end(info.render_target_names), sampler.texture_name) != std::end(info.render_target_names))
+					error(pass_location, 3020, '\'' + sampler.texture_name + "': cannot sample from texture that is also used as render target in the same pass");
+
+				info.samplers.push_back(sampler);
+			}
+
 			if (!vs_info.referenced_storages.empty() || !ps_info.referenced_storages.empty())
 			{
 				parse_success = false;
 				error(pass_location, 3667, "storage writes are only valid in compute shaders");
 			}
-		}
 
-		// Verify render target format supports sRGB writes if enabled
-		if (info.srgb_write_enable && !targets_support_srgb)
-			parse_success = false,
-			error(pass_location, 4582, "one or more render target(s) do not support sRGB writes (only textures with RGBA8 format do)");
+			// Verify render target format supports sRGB writes if enabled
+			if (info.srgb_write_enable && !targets_support_srgb)
+			{
+				parse_success = false;
+				error(pass_location, 4582, "one or more render target(s) do not support sRGB writes (only textures with RGBA8 format do)");
+			}
+		}
 	}
 
 	return expect('}') && parse_success;

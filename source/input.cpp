@@ -6,13 +6,14 @@
 #include "input.hpp"
 #include "dll_log.hpp"
 #include "hook_manager.hpp"
-#include <algorithm>
 #include <unordered_map>
+#include <cstring> // std::memset
+#include <algorithm> // std::any_of, std::copy_n, std::max_element
 #include <Windows.h>
 
 extern bool is_uwp_app();
 
-extern HMODULE g_module_handle;
+extern HANDLE g_exit_event;
 static std::shared_mutex s_windows_mutex;
 static std::unordered_map<HWND, unsigned int> s_raw_input_windows;
 static std::unordered_map<HWND, std::weak_ptr<reshade::input>> s_windows;
@@ -271,7 +272,7 @@ bool reshade::input::is_key_down(unsigned int keycode) const
 bool reshade::input::is_key_pressed(unsigned int keycode) const
 {
 	assert(keycode < ARRAYSIZE(_keys));
-	return keycode > 0 && keycode < ARRAYSIZE(_keys) && (_keys[keycode] & 0x88) == 0x88;
+	return keycode > 0 && keycode < ARRAYSIZE(_keys) && (_keys[keycode] & 0x88) == 0x88 && !is_key_repeated(keycode);
 }
 bool reshade::input::is_key_pressed(unsigned int keycode, bool ctrl, bool shift, bool alt, bool force_modifiers) const
 {
@@ -288,6 +289,11 @@ bool reshade::input::is_key_released(unsigned int keycode) const
 {
 	assert(keycode < ARRAYSIZE(_keys));
 	return keycode > 0 && keycode < ARRAYSIZE(_keys) && (_keys[keycode] & 0x88) == 0x08;
+}
+bool reshade::input::is_key_repeated(unsigned int keycode) const
+{
+	assert(keycode < ARRAYSIZE(_keys));
+	return keycode < ARRAYSIZE(_keys) && (_last_keys[keycode] & 0x80) == 0x80 && (_keys[keycode] & 0x80) == 0x80;
 }
 
 bool reshade::input::is_any_key_down() const
@@ -372,6 +378,9 @@ void reshade::input::next_frame()
 {
 	_frame_count++;
 
+	// Backup key states from the last processed frame so that state transitions can be identified
+	std::copy_n(_keys, 256, _last_keys);
+
 	for (uint8_t &state : _keys)
 		state &= ~0x08;
 
@@ -411,25 +420,11 @@ std::string reshade::input::key_name(unsigned int keycode)
 	if (keycode >= 256)
 		return std::string();
 
-	static const char *keyboard_keys_german[256] = {
-		"", "Left Mouse", "Right Mouse", "Cancel", "Middle Mouse", "X1 Mouse", "X2 Mouse", "", "Backspace", "Tab", "", "", "Clear", "Eingabe", "", "",
-		"Shift", "Strg", "Alt", "Pause", "Caps Lock", "", "", "", "", "", "", "Escape", "", "", "", "",
-		"Leertaste", "Bild auf", "Bild ab", "Ende", "Pos 1", "Left Arrow", "Up Arrow", "Right Arrow", "Down Arrow", "Select", "", "", "Druck", "Einfg", "Entf", "Hilfe",
-		"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "", "", "", "", "", "",
-		"", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O",
-		"P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "Left Windows", "Right Windows", "Apps", "", "Sleep",
-		"Numpad 0", "Numpad 1", "Numpad 2", "Numpad 3", "Numpad 4", "Numpad 5", "Numpad 6", "Numpad 7", "Numpad 8", "Numpad 9", "Numpad *", "Numpad +", "", "Numpad -", "Numpad ,", "Numpad /",
-		"F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12", "F13", "F14", "F15", "F16",
-		"F17", "F18", "F19", "F20", "F21", "F22", "F23", "F24", "", "", "", "", "", "", "", "",
-		"Num Lock", "Rollen", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-		"Shift links", "Shift rechts", "Strg links", "Strg rechts", "Alt links", "Alt rechts", "Browser Back", "Browser Forward", "Browser Refresh", "Browser Stop", "Browser Search", "Browser Favorites", "Browser Home", "Volume Mute", "Volume Down", "Volume Up",
-		"Next Track", "Previous Track", "Media Stop", "Media Play/Pause", "Mail", "Media Select", "Launch App 1", "Launch App 2", "", "", u8"Ü", "OEM +", "OEM ,", "OEM -", "OEM .", "OEM #",
-		u8"Ö", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-		"", "", "", "", "", "", "", "", "", "", "", u8"OEM ß", "OEM ^", u8"OEM ´", u8"Ä", "OEM 8",
-		"", "", "OEM <", "", "", "", "", "", "", "", "", "", "", "", "", "",
-		"", "", "", "", "", "", "Attn", "CrSel", "ExSel", "Erase EOF", "Play", "Zoom", "", "PA1", "OEM Clear", ""
-	};
-	static const char *keyboard_keys_international[256] = {
+	if (keycode == VK_HOME &&
+		LOBYTE(GetKeyboardLayout(0)) == LANG_GERMAN)
+		return "Pos1";
+
+	static const char *keyboard_keys[256] = {
 		"", "Left Mouse", "Right Mouse", "Cancel", "Middle Mouse", "X1 Mouse", "X2 Mouse", "", "Backspace", "Tab", "", "", "Clear", "Enter", "", "",
 		"Shift", "Control", "Alt", "Pause", "Caps Lock", "", "", "", "", "", "", "Escape", "", "", "", "",
 		"Space", "Page Up", "Page Down", "End", "Home", "Left Arrow", "Up Arrow", "Right Arrow", "Down Arrow", "Select", "", "", "Print Screen", "Insert", "Delete", "Help",
@@ -448,10 +443,7 @@ std::string reshade::input::key_name(unsigned int keycode)
 		"", "", "", "", "", "", "Attn", "CrSel", "ExSel", "Erase EOF", "Play", "Zoom", "", "PA1", "OEM Clear", ""
 	};
 
-	const LANGID language = LOWORD(GetKeyboardLayout(0));
-
-	return ((language & 0xFF) == LANG_GERMAN) ?
-		keyboard_keys_german[keycode] : keyboard_keys_international[keycode];
+	return keyboard_keys[keycode];
 }
 std::string reshade::input::key_name(const unsigned int key[4])
 {
@@ -495,12 +487,38 @@ bool is_blocking_keyboard_input()
 extern "C" BOOL WINAPI HookGetMessageA(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax)
 {
 #if 1
-	// Implement 'GetMessage' with a timeout (see also DLL_PROCESS_DETACH in dllmain.cpp for more explanation)
-	while (!PeekMessageA(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, PM_REMOVE) && g_module_handle != nullptr)
-		MsgWaitForMultipleObjects(0, nullptr, FALSE, 500, QS_ALLINPUT);
+	DWORD mask = QS_ALLINPUT;
+	if (wMsgFilterMin != 0 || wMsgFilterMax != 0)
+	{
+		mask = QS_POSTMESSAGE | QS_SENDMESSAGE;
+		if (wMsgFilterMin <= WM_KEYLAST && wMsgFilterMax >= WM_KEYFIRST)
+			mask |= QS_KEY;
+		if ((wMsgFilterMin <= WM_MOUSELAST &&
+			 wMsgFilterMax >= WM_MOUSEFIRST) ||
+			(wMsgFilterMin <= WM_MOUSELAST + WM_NCMOUSEMOVE - WM_MOUSEMOVE &&
+			 wMsgFilterMax >= WM_MOUSEFIRST + WM_NCMOUSEMOVE - WM_MOUSEMOVE))
+			mask |= QS_MOUSE;
+		if (wMsgFilterMin <= WM_TIMER && wMsgFilterMax >= WM_TIMER)
+			mask |= QS_TIMER;
+		if (wMsgFilterMin <= WM_PAINT && wMsgFilterMax >= WM_PAINT)
+			mask |= QS_PAINT;
+		if (wMsgFilterMin <= WM_HOTKEY && wMsgFilterMax >= WM_HOTKEY)
+			mask |= QS_HOTKEY;
+		if (wMsgFilterMin <= WM_INPUT && wMsgFilterMax >= WM_INPUT)
+			mask |= QS_RAWINPUT;
+	}
 
-	if (g_module_handle == nullptr && lpMsg->message != WM_QUIT)
-		std::memset(lpMsg, 0, sizeof(MSG)); // Clear message structure, so application does not process it
+	// Implement 'GetMessage' with an additional trigger event (see also DLL_PROCESS_DETACH in dllmain.cpp for more explanation)
+	while (!PeekMessageA(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, PM_REMOVE))
+	{
+		assert(g_exit_event != nullptr);
+
+		if (MsgWaitForMultipleObjects(1, &g_exit_event, FALSE, INFINITE, mask) != (WAIT_OBJECT_0 + 1))
+		{
+			std::memset(lpMsg, 0, sizeof(MSG)); // Clear message structure, so application does not process it
+			return -1;
+		}
+	}
 #else
 	static const auto trampoline = reshade::hooks::call(HookGetMessageA);
 	const BOOL result = trampoline(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax);
@@ -524,11 +542,37 @@ extern "C" BOOL WINAPI HookGetMessageA(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMi
 extern "C" BOOL WINAPI HookGetMessageW(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax)
 {
 #if 1
-	while (!PeekMessageW(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, PM_REMOVE) && g_module_handle != nullptr)
-		MsgWaitForMultipleObjects(0, nullptr, FALSE, 500, QS_ALLINPUT);
+	DWORD mask = QS_ALLINPUT;
+	if (wMsgFilterMin != 0 || wMsgFilterMax != 0)
+	{
+		mask = QS_POSTMESSAGE | QS_SENDMESSAGE;
+		if (wMsgFilterMin <= WM_KEYLAST && wMsgFilterMax >= WM_KEYFIRST)
+			mask |= QS_KEY;
+		if ((wMsgFilterMin <= WM_MOUSELAST &&
+			 wMsgFilterMax >= WM_MOUSEFIRST) ||
+			(wMsgFilterMin <= WM_MOUSELAST + WM_NCMOUSEMOVE - WM_MOUSEMOVE &&
+			 wMsgFilterMax >= WM_MOUSEFIRST + WM_NCMOUSEMOVE - WM_MOUSEMOVE))
+			mask |= QS_MOUSE;
+		if (wMsgFilterMin <= WM_TIMER && wMsgFilterMax >= WM_TIMER)
+			mask |= QS_TIMER;
+		if (wMsgFilterMin <= WM_PAINT && wMsgFilterMax >= WM_PAINT)
+			mask |= QS_PAINT;
+		if (wMsgFilterMin <= WM_HOTKEY && wMsgFilterMax >= WM_HOTKEY)
+			mask |= QS_HOTKEY;
+		if (wMsgFilterMin <= WM_INPUT && wMsgFilterMax >= WM_INPUT)
+			mask |= QS_RAWINPUT;
+	}
 
-	if (g_module_handle == nullptr && lpMsg->message != WM_QUIT)
-		std::memset(lpMsg, 0, sizeof(MSG));
+	while (!PeekMessageW(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, PM_REMOVE))
+	{
+		assert(g_exit_event != nullptr);
+
+		if (MsgWaitForMultipleObjects(1, &g_exit_event, FALSE, INFINITE, mask) != (WAIT_OBJECT_0 + 1))
+		{
+			std::memset(lpMsg, 0, sizeof(MSG));
+			return -1;
+		}
+	}
 #else
 	static const auto trampoline = reshade::hooks::call(HookGetMessageW);
 	const BOOL result = trampoline(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax);
@@ -552,10 +596,8 @@ extern "C" BOOL WINAPI HookGetMessageW(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMi
 extern "C" BOOL WINAPI HookPeekMessageA(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax, UINT wRemoveMsg)
 {
 	static const auto trampoline = reshade::hooks::call(HookPeekMessageA);
-	if (!trampoline(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg))
+	if (!trampoline(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg) || lpMsg == nullptr)
 		return FALSE;
-
-	assert(lpMsg != nullptr);
 
 	if (lpMsg->hwnd != nullptr && (wRemoveMsg & PM_REMOVE) != 0 && reshade::input::handle_window_message(lpMsg))
 	{
@@ -571,10 +613,8 @@ extern "C" BOOL WINAPI HookPeekMessageA(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterM
 extern "C" BOOL WINAPI HookPeekMessageW(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax, UINT wRemoveMsg)
 {
 	static const auto trampoline = reshade::hooks::call(HookPeekMessageW);
-	if (!trampoline(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg))
+	if (!trampoline(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg) || lpMsg == nullptr)
 		return FALSE;
-
-	assert(lpMsg != nullptr);
 
 	if (lpMsg->hwnd != nullptr && (wRemoveMsg & PM_REMOVE) != 0 && reshade::input::handle_window_message(lpMsg))
 	{

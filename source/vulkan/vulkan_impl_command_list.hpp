@@ -15,7 +15,6 @@ namespace reshade::vulkan
 
 	public:
 		command_list_impl(device_impl *device, VkCommandBuffer cmd_list);
-		~command_list_impl();
 
 		api::device *get_device() final;
 
@@ -31,8 +30,8 @@ namespace reshade::vulkan
 		void bind_scissor_rects(uint32_t first, uint32_t count, const api::rect *rects) final;
 
 		void push_constants(api::shader_stage stages, api::pipeline_layout layout, uint32_t layout_param, uint32_t first, uint32_t count, const void *values) final;
-		void push_descriptors(api::shader_stage stages, api::pipeline_layout layout, uint32_t layout_param, const api::descriptor_set_update &update) final;
-		void bind_descriptor_sets(api::shader_stage stages, api::pipeline_layout layout, uint32_t first, uint32_t count, const api::descriptor_set *sets) final;
+		void push_descriptors(api::shader_stage stages, api::pipeline_layout layout, uint32_t layout_param, const api::descriptor_table_update &update) final;
+		void bind_descriptor_tables(api::shader_stage stages, api::pipeline_layout layout, uint32_t first, uint32_t count, const api::descriptor_table *tables) final;
 
 		void bind_index_buffer(api::resource buffer, uint64_t offset, uint32_t index_size) final;
 		void bind_vertex_buffers(uint32_t first, uint32_t count, const api::resource *buffers, const uint64_t *offsets, const uint32_t *strides) final;
@@ -41,6 +40,8 @@ namespace reshade::vulkan
 		void draw(uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance) final;
 		void draw_indexed(uint32_t index_count, uint32_t instance_count, uint32_t first_index, int32_t vertex_offset, uint32_t first_instance) final;
 		void dispatch(uint32_t group_count_x, uint32_t group_count_y, uint32_t group_count_z) final;
+		void dispatch_mesh(uint32_t group_count_x, uint32_t group_count_y, uint32_t group_count_z) final;
+		void dispatch_rays(api::resource raygen, uint64_t raygen_offset, uint64_t raygen_size, api::resource miss, uint64_t miss_offset, uint64_t miss_size, uint64_t miss_stride, api::resource hit_group, uint64_t hit_group_offset, uint64_t hit_group_size, uint64_t hit_group_stride, api::resource callable, uint64_t callable_offset, uint64_t callable_size, uint64_t callable_stride, uint32_t width, uint32_t height, uint32_t depth) final;
 		void draw_or_dispatch_indirect(api::indirect_command type, api::resource buffer, uint64_t offset, uint32_t draw_count, uint32_t stride) final;
 
 		void copy_resource(api::resource source, api::resource dest) final;
@@ -57,9 +58,12 @@ namespace reshade::vulkan
 
 		void generate_mipmaps(api::resource_view srv) final;
 
-		void begin_query(api::query_pool pool, api::query_type type, uint32_t index) final;
-		void end_query(api::query_pool pool, api::query_type type, uint32_t index) final;
-		void copy_query_pool_results(api::query_pool pool, api::query_type type, uint32_t first, uint32_t count, api::resource dest, uint64_t dest_offset, uint32_t stride) final;
+		void begin_query(api::query_heap heap, api::query_type type, uint32_t index) final;
+		void end_query(api::query_heap heap, api::query_type type, uint32_t index) final;
+		void copy_query_heap_results(api::query_heap heap, api::query_type type, uint32_t first, uint32_t count, api::resource dest, uint64_t dest_offset, uint32_t stride) final;
+
+		void copy_acceleration_structure(api::resource_view source, api::resource_view dest, api::acceleration_structure_copy_mode mode) final;
+		void build_acceleration_structure(api::acceleration_structure_type type, api::acceleration_structure_build_flags flags, uint32_t input_count, const api::acceleration_structure_build_input *inputs, api::resource scratch, uint64_t scratch_offset, api::resource_view source, api::resource_view dest, api::acceleration_structure_build_mode mode) final;
 
 		void begin_debug_event(const char *label, const float color[4]) final;
 		void end_debug_event() final;
@@ -68,6 +72,7 @@ namespace reshade::vulkan
 	protected:
 		device_impl *const _device_impl;
 		bool _has_commands = false;
+		bool _is_in_render_pass = false;
 	};
 
 	template <>
@@ -78,6 +83,8 @@ namespace reshade::vulkan
 		object_data(device_impl *device, VkCommandBuffer cmd_list) : command_list_impl(device, cmd_list) {}
 
 #if RESHADE_ADDON
+		using command_list_impl::_is_in_render_pass;
+
 		uint32_t current_subpass = std::numeric_limits<uint32_t>::max();
 		VkRenderPass current_render_pass = VK_NULL_HANDLE;
 		VkFramebuffer current_framebuffer = VK_NULL_HANDLE;

@@ -9,7 +9,7 @@
 #include <algorithm> // std::upper_bound, std::sort
 #include <functional> // std::greater
 
-enum class intrinsic_id : uint32_t
+enum class intrinsic_id
 {
 #define IMPLEMENT_INTRINSIC_SPIRV(name, i, code) name##i,
 	#include "effect_symbol_table_intrinsics.inl"
@@ -19,8 +19,8 @@ struct intrinsic
 {
 	intrinsic(const char *name, intrinsic_id id, const reshadefx::type &ret_type, std::initializer_list<reshadefx::type> arg_types) : id(id)
 	{
-		function.name = name;
 		function.return_type = ret_type;
+		function.name = name;
 		function.parameter_list.reserve(arg_types.size());
 		for (const reshadefx::type &arg_type : arg_types)
 			function.parameter_list.push_back({ arg_type });
@@ -75,8 +75,36 @@ struct intrinsic
 #define out_float2 { reshadefx::type::t_float, 2, 1, reshadefx::type::q_out }
 #define out_float3 { reshadefx::type::t_float, 3, 1, reshadefx::type::q_out }
 #define out_float4 { reshadefx::type::t_float, 4, 1, reshadefx::type::q_out }
-#define sampler { reshadefx::type::t_sampler }
-#define storage { reshadefx::type::t_storage }
+#define sampler1d_int { reshadefx::type::t_sampler1d_int, 1, 1 }
+#define sampler2d_int { reshadefx::type::t_sampler2d_int, 1, 1 }
+#define sampler3d_int { reshadefx::type::t_sampler3d_int, 1, 1 }
+#define sampler1d_uint { reshadefx::type::t_sampler1d_uint, 1, 1 }
+#define sampler2d_uint { reshadefx::type::t_sampler2d_uint, 1, 1 }
+#define sampler3d_uint { reshadefx::type::t_sampler3d_uint, 1, 1 }
+#define sampler1d_float { reshadefx::type::t_sampler1d_float, 1, 1 }
+#define sampler2d_float { reshadefx::type::t_sampler2d_float, 1, 1 }
+#define sampler3d_float { reshadefx::type::t_sampler3d_float, 1, 1 }
+#define sampler1d_float4 { reshadefx::type::t_sampler1d_float, 4, 1 }
+#define sampler2d_float4 { reshadefx::type::t_sampler2d_float, 4, 1 }
+#define sampler3d_float4 { reshadefx::type::t_sampler3d_float, 4, 1 }
+#define storage1d_int { reshadefx::type::t_storage1d_int, 1, 1 }
+#define storage2d_int { reshadefx::type::t_storage2d_int, 1, 1 }
+#define storage3d_int { reshadefx::type::t_storage3d_int, 1, 1 }
+#define storage1d_uint { reshadefx::type::t_storage1d_uint, 1, 1 }
+#define storage2d_uint { reshadefx::type::t_storage2d_uint, 1, 1 }
+#define storage3d_uint { reshadefx::type::t_storage3d_uint, 1, 1 }
+#define storage1d_float { reshadefx::type::t_storage1d_float, 1, 1 }
+#define storage2d_float { reshadefx::type::t_storage2d_float, 1, 1 }
+#define storage3d_float { reshadefx::type::t_storage3d_float, 1, 1 }
+#define storage1d_float4 { reshadefx::type::t_storage1d_float, 4, 1 }
+#define storage2d_float4 { reshadefx::type::t_storage2d_float, 4, 1 }
+#define storage3d_float4 { reshadefx::type::t_storage3d_float, 4, 1 }
+#define inout_storage1d_int { reshadefx::type::t_storage1d_int, 1, 1, reshadefx::type::q_inout }
+#define inout_storage2d_int { reshadefx::type::t_storage2d_int, 1, 1, reshadefx::type::q_inout }
+#define inout_storage3d_int { reshadefx::type::t_storage3d_int, 1, 1, reshadefx::type::q_inout }
+#define inout_storage1d_uint { reshadefx::type::t_storage1d_uint, 1, 1, reshadefx::type::q_inout }
+#define inout_storage2d_uint { reshadefx::type::t_storage2d_uint, 1, 1, reshadefx::type::q_inout }
+#define inout_storage3d_uint { reshadefx::type::t_storage3d_uint, 1, 1, reshadefx::type::q_inout }
 
 // Import intrinsic function definitions
 static const intrinsic s_intrinsics[] =
@@ -98,28 +126,19 @@ static const intrinsic s_intrinsics[] =
 #undef uint2
 #undef uint3
 #undef uint4
-#undef float1
+#undef float
 #undef float2
 #undef float3
 #undef float4
-#undef float2x2
-#undef float3x3
-#undef float4x4
-#undef out_float
-#undef out_float2
-#undef out_float3
-#undef out_float4
-#undef sampler
-#undef storage
 
 unsigned int reshadefx::type::rank(const type &src, const type &dst)
 {
-	if (src.is_array() != dst.is_array() || (src.array_length != dst.array_length && src.array_length > 0 && dst.array_length > 0))
+	if (src.is_array() != dst.is_array() || (src.array_length != dst.array_length && src.is_bounded_array() && dst.is_bounded_array()))
 		return 0; // Arrays of different sizes are not compatible
 	if (src.is_struct() || dst.is_struct())
 		return src.definition == dst.definition ? 32 : 0; // Structs are only compatible if they are the same type
 	if (!src.is_numeric() || !dst.is_numeric())
-		return src.base == dst.base ? 32 : 0; // Numeric values are not compatible with other types
+		return src.base == dst.base && src.rows == dst.rows && src.cols == dst.cols ? 32 : 0; // Numeric values are not compatible with other types
 	if (src.is_matrix() && (!dst.is_matrix() || src.rows != dst.rows || src.cols != dst.cols))
 		return 0; // Matrix truncation or dimensions do not match
 
@@ -127,7 +146,7 @@ unsigned int reshadefx::type::rank(const type &src, const type &dst)
 	//  - Floating point has a higher rank than integer types
 	//  - Integer to floating point promotion has a higher rank than floating point to integer conversion
 	//  - Signed to unsigned integer conversion has a higher rank than unsigned to signed integer conversion
-	static const int ranks[7][7] = {
+	static const unsigned int ranks[7][7] = {
 		{ 5, 4, 4, 4, 4, 4, 4 }, // bool
 		{ 3, 5, 5, 2, 2, 4, 4 }, // min16int
 		{ 3, 5, 5, 2, 2, 4, 4 }, // int
@@ -140,7 +159,7 @@ unsigned int reshadefx::type::rank(const type &src, const type &dst)
 	assert(src.base > 0 && src.base <= 7); // bool - float
 	assert(dst.base > 0 && dst.base <= 7);
 
-	const int rank = ranks[src.base - 1][dst.base - 1] << 2;
+	const unsigned int rank = ranks[src.base - 1][dst.base - 1] << 2;
 
 	if ((src.is_scalar() && dst.is_vector()))
 		return rank >> 1; // Scalar to vector promotion has a lower rank
@@ -230,7 +249,7 @@ bool reshadefx::symbol_table::insert_symbol(const std::string &name, const symbo
 		{
 			// Extract scope name
 			scope.name = _current_scope.name.substr(0, pos += 2);
-			const auto previous_scope_name = _current_scope.name.substr(pos);
+			const std::string previous_scope_name = _current_scope.name.substr(pos);
 
 			// Insert symbol into this scope
 			insert_sorted(_symbol_stack[previous_scope_name + name], scoped_symbol { symbol, scope });
@@ -371,7 +390,7 @@ bool reshadefx::symbol_table::resolve_function_call(const std::string &name, con
 					continue;
 				}
 			}
-			else if (arguments.size() != function->parameter_list.size())
+			else if (arguments.size() > function->parameter_list.size() || (arguments.size() < function->parameter_list.size() && !function->parameter_list[arguments.size()].has_default_value))
 			{
 				continue;
 			}

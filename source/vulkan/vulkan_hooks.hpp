@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cassert>
+#include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
 
 // Windows SDK headers define these, which breaks the dispatch table
@@ -21,7 +22,7 @@ struct instance_dispatch_table : public VkLayerInstanceDispatchTable
 };
 
 template <typename T>
-static T *find_layer_info(const void *structure_chain, VkStructureType type, VkLayerFunction function)
+inline T *find_layer_info(const void *structure_chain, VkStructureType type, VkLayerFunction function)
 {
 	T *next = reinterpret_cast<T *>(const_cast<void *>(structure_chain));
 	while (next != nullptr && !(next->sType == type && next->function == function))
@@ -29,7 +30,7 @@ static T *find_layer_info(const void *structure_chain, VkStructureType type, VkL
 	return next;
 }
 template <typename T>
-static const T *find_in_structure_chain(const void *structure_chain, VkStructureType type)
+inline const T *find_in_structure_chain(const void *structure_chain, VkStructureType type)
 {
 	const T *next = reinterpret_cast<const T *>(structure_chain);
 	while (next != nullptr && next->sType != type)
@@ -37,7 +38,7 @@ static const T *find_in_structure_chain(const void *structure_chain, VkStructure
 	return next;
 }
 
-static inline void *dispatch_key_from_handle(const void *dispatch_handle)
+inline void *const dispatch_key_from_handle(const void *dispatch_handle)
 {
 	assert(dispatch_handle != nullptr);
 

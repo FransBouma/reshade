@@ -8,6 +8,7 @@
 #include "d3d12_command_queue.hpp"
 #include "d3d12_command_queue_downlevel.hpp"
 #include "dll_log.hpp"
+#include "addon_manager.hpp"
 
 D3D12CommandQueue::D3D12CommandQueue(D3D12Device *device, ID3D12CommandQueue *original) :
 	command_queue_impl(device, original),
@@ -16,6 +17,18 @@ D3D12CommandQueue::D3D12CommandQueue(D3D12Device *device, ID3D12CommandQueue *or
 	assert(_orig != nullptr && _device != nullptr);
 	// Explicitly add a reference to the device, to ensure it stays valid for the lifetime of this queue object
 	_device->AddRef();
+
+#if RESHADE_ADDON
+	reshade::invoke_addon_event<reshade::addon_event::init_command_queue>(this);
+#endif
+}
+D3D12CommandQueue::~D3D12CommandQueue()
+{
+#if RESHADE_ADDON
+	reshade::invoke_addon_event<reshade::addon_event::destroy_command_queue>(this);
+#endif
+
+	// Release the device reference below at the end of 'D3D12CommandQueue::Release' rather than here, since the '~command_queue_impl' destructor still has to run with the device alive
 }
 
 bool D3D12CommandQueue::check_and_upgrade_interface(REFIID riid)
@@ -27,11 +40,11 @@ bool D3D12CommandQueue::check_and_upgrade_interface(REFIID riid)
 		riid == __uuidof(ID3D12Pageable))
 		return true;
 
-	static const IID iid_lookup[] = {
+	static constexpr IID iid_lookup[] = {
 		__uuidof(ID3D12CommandQueue),
 	};
 
-	for (unsigned int version = 0; version < ARRAYSIZE(iid_lookup); ++version)
+	for (unsigned short version = 0; version < ARRAYSIZE(iid_lookup); ++version)
 	{
 		if (riid != iid_lookup[version])
 			continue;
@@ -73,8 +86,11 @@ HRESULT STDMETHODCALLTYPE D3D12CommandQueue::QueryInterface(REFIID riid, void **
 		if (ID3D12CommandQueueDownlevel *downlevel = nullptr; // Not a 'com_ptr' since D3D12CommandQueueDownlevel will take ownership
 			_downlevel == nullptr && SUCCEEDED(_orig->QueryInterface(&downlevel)))
 			_downlevel = new D3D12CommandQueueDownlevel(this, downlevel);
+
 		if (_downlevel != nullptr)
 			return _downlevel->QueryInterface(riid, ppvObj);
+		else
+			return E_NOINTERFACE;
 	}
 
 	return _orig->QueryInterface(riid, ppvObj);

@@ -18,7 +18,7 @@ enum token_type
 };
 
 // Lookup table which translates a given char to a token type
-static const unsigned type_lookup[256] = {
+static const unsigned int s_type_lookup[256] = {
 	 0xFF,  0x00,  0x00,  0x00,  0x00,  0x00,  0x00,  0x00,  0x00, SPACE,
 	 '\n', SPACE, SPACE, SPACE,  0x00,  0x00,  0x00,  0x00,  0x00,  0x00,
 	 0x00,  0x00,  0x00,  0x00,  0x00,  0x00,  0x00,  0x00,  0x00,  0x00,
@@ -35,7 +35,7 @@ static const unsigned type_lookup[256] = {
 };
 
 // Lookup tables which translate a given string literal to a token and backwards
-static const std::unordered_map<tokenid, std::string_view> token_lookup = {
+static const std::unordered_map<tokenid, std::string_view> s_token_lookup = {
 	{ tokenid::end_of_file, "end of file" },
 	{ tokenid::exclaim, "!" },
 	{ tokenid::hash, "#" },
@@ -195,11 +195,17 @@ static const std::unordered_map<tokenid, std::string_view> token_lookup = {
 	{ tokenid::vector, "vector" },
 	{ tokenid::matrix, "matrix" },
 	{ tokenid::string_, "string" },
-	{ tokenid::texture, "texture" },
-	{ tokenid::sampler, "sampler" },
-	{ tokenid::storage, "storage" },
+	{ tokenid::texture1d, "texture1D" },
+	{ tokenid::texture2d, "texture2D" },
+	{ tokenid::texture3d, "texture3D" },
+	{ tokenid::sampler1d, "sampler1D" },
+	{ tokenid::sampler2d, "sampler2D" },
+	{ tokenid::sampler3d, "sampler3D" },
+	{ tokenid::storage1d, "storage1D" },
+	{ tokenid::storage2d, "storage2D" },
+	{ tokenid::storage3d, "storage3D" },
 };
-static const std::unordered_map<std::string_view, tokenid> keyword_lookup = {
+static const std::unordered_map<std::string_view, tokenid> s_keyword_lookup = {
 	{ "asm", tokenid::reserved },
 	{ "asm_fragment", tokenid::reserved },
 	{ "auto", tokenid::reserved },
@@ -355,14 +361,14 @@ static const std::unordered_map<std::string_view, tokenid> keyword_lookup = {
 	{ "return", tokenid::return_ },
 	{ "row_major", tokenid::reserved },
 	{ "sample", tokenid::reserved },
-	{ "sampler", tokenid::sampler },
-	{ "sampler1D", tokenid::sampler },
+	{ "sampler", tokenid::sampler2d },
+	{ "sampler1D", tokenid::sampler1d },
 	{ "sampler1DArray", tokenid::reserved },
-	{ "sampler2D", tokenid::sampler },
+	{ "sampler2D", tokenid::sampler2d },
 	{ "sampler2DArray", tokenid::reserved },
 	{ "sampler2DMS", tokenid::reserved },
 	{ "sampler2DMSArray", tokenid::reserved },
-	{ "sampler3D", tokenid::sampler },
+	{ "sampler3D", tokenid::sampler3d },
 	{ "sampler_state", tokenid::reserved },
 	{ "samplerCube", tokenid::reserved },
 	{ "samplerCubeArray", tokenid::reserved },
@@ -370,10 +376,10 @@ static const std::unordered_map<std::string_view, tokenid> keyword_lookup = {
 	{ "samplerRect", tokenid::reserved },
 	{ "samplerRECT", tokenid::reserved },
 	{ "SamplerState", tokenid::reserved },
-	{ "storage", tokenid::storage },
-	{ "storage1D", tokenid::storage },
-	{ "storage2D", tokenid::storage },
-	{ "storage3D", tokenid::storage },
+	{ "storage", tokenid::storage2d },
+	{ "storage1D", tokenid::storage1d },
+	{ "storage2D", tokenid::storage2d },
+	{ "storage3D", tokenid::storage3d },
 	{ "shared", tokenid::reserved },
 	{ "short", tokenid::reserved },
 	{ "signed", tokenid::reserved },
@@ -386,17 +392,17 @@ static const std::unordered_map<std::string_view, tokenid> keyword_lookup = {
 	{ "switch", tokenid::switch_ },
 	{ "technique", tokenid::technique },
 	{ "template", tokenid::reserved },
-	{ "texture", tokenid::texture },
+	{ "texture", tokenid::texture2d },
 	{ "Texture1D", tokenid::reserved },
-	{ "texture1D", tokenid::texture },
+	{ "texture1D", tokenid::texture1d },
 	{ "Texture1DArray", tokenid::reserved },
 	{ "Texture2D", tokenid::reserved },
-	{ "texture2D", tokenid::texture },
+	{ "texture2D", tokenid::texture2d },
 	{ "Texture2DArray", tokenid::reserved },
 	{ "Texture2DMS", tokenid::reserved },
 	{ "Texture2DMSArray", tokenid::reserved },
 	{ "Texture3D", tokenid::reserved },
-	{ "texture3D", tokenid::texture },
+	{ "texture3D", tokenid::texture3d },
 	{ "textureCUBE", tokenid::reserved },
 	{ "TextureCube", tokenid::reserved },
 	{ "TextureCubeArray", tokenid::reserved },
@@ -433,7 +439,7 @@ static const std::unordered_map<std::string_view, tokenid> keyword_lookup = {
 	{ "volatile", tokenid::volatile_ },
 	{ "while", tokenid::while_ }
 };
-static const std::unordered_map<std::string_view, tokenid> pp_directive_lookup = {
+static const std::unordered_map<std::string_view, tokenid> s_pp_directive_lookup = {
 	{ "define", tokenid::hash_def },
 	{ "undef", tokenid::hash_undef },
 	{ "if", tokenid::hash_if },
@@ -448,15 +454,15 @@ static const std::unordered_map<std::string_view, tokenid> pp_directive_lookup =
 	{ "include", tokenid::hash_include },
 };
 
-static inline bool is_octal_digit(char c)
+static bool is_octal_digit(char c)
 {
 	return static_cast<unsigned>(c - '0') < 8;
 }
-static inline bool is_decimal_digit(char c)
+static bool is_decimal_digit(char c)
 {
 	return static_cast<unsigned>(c - '0') < 10;
 }
-static inline bool is_hexadecimal_digit(char c)
+static bool is_hexadecimal_digit(char c)
 {
 	return is_decimal_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
 }
@@ -498,8 +504,8 @@ static long long octal_to_decimal(long long n)
 
 std::string reshadefx::token::id_to_name(tokenid id)
 {
-	const auto it = token_lookup.find(id);
-	if (it != token_lookup.end())
+	const auto it = s_token_lookup.find(id);
+	if (it != s_token_lookup.end())
 		return std::string(it->second);
 	return "unknown";
 }
@@ -520,7 +526,7 @@ next_token:
 	assert(_cur <= _end);
 
 	// Do a character type lookup for the current character
-	switch (type_lookup[uint8_t(*_cur)])
+	switch (s_type_lookup[uint8_t(*_cur)])
 	{
 	case 0xFF: // EOF
 		tok.id = tokenid::end_of_file;
@@ -629,7 +635,7 @@ next_token:
 			tok.id = tokenid::minus;
 		break;
 	case '.':
-		if (type_lookup[uint8_t(_cur[1])] == DIGIT)
+		if (s_type_lookup[uint8_t(_cur[1])] == DIGIT)
 			parse_numeric_literal(tok);
 		else if (_cur[1] == '.' && _cur[2] == '.')
 			tok.id = tokenid::ellipsis,
@@ -799,7 +805,7 @@ void reshadefx::lexer::skip_space()
 			continue;
 		}
 
-		if (type_lookup[uint8_t(*_cur)] == SPACE)
+		if (s_type_lookup[uint8_t(*_cur)] == SPACE)
 			skip(1);
 		else
 			break;
@@ -835,7 +841,7 @@ void reshadefx::lexer::parse_identifier(token &tok) const
 	auto *const begin = _cur, *end = begin;
 
 	// Skip to the end of the identifier sequence
-	while (type_lookup[uint8_t(*end)] == IDENT || type_lookup[uint8_t(*end)] == DIGIT)
+	while (s_type_lookup[uint8_t(*end)] == IDENT || s_type_lookup[uint8_t(*end)] == DIGIT)
 		end++;
 
 	tok.id = tokenid::identifier;
@@ -846,8 +852,8 @@ void reshadefx::lexer::parse_identifier(token &tok) const
 	if (_ignore_keywords)
 		return;
 
-	if (const auto it = keyword_lookup.find(tok.literal_as_string);
-		it != keyword_lookup.end())
+	if (const auto it = s_keyword_lookup.find(tok.literal_as_string);
+		it != s_keyword_lookup.end())
 		tok.id = it->second;
 }
 bool reshadefx::lexer::parse_pp_directive(token &tok)
@@ -856,8 +862,8 @@ bool reshadefx::lexer::parse_pp_directive(token &tok)
 	skip_space(); // Skip any space between the '#' and directive
 	parse_identifier(tok);
 
-	if (const auto it = pp_directive_lookup.find(tok.literal_as_string);
-		it != pp_directive_lookup.end())
+	if (const auto it = s_pp_directive_lookup.find(tok.literal_as_string);
+		it != s_pp_directive_lookup.end())
 	{
 		tok.id = it->second;
 		return true;
@@ -993,6 +999,9 @@ void reshadefx::lexer::parse_string_literal(token &tok, bool escape)
 
 	tok.id = tokenid::string_literal;
 	tok.length = end - begin + 1;
+
+	// Free up unused memory
+	tok.literal_as_string.shrink_to_fit();
 }
 void reshadefx::lexer::parse_numeric_literal(token &tok) const
 {

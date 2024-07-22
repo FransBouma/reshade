@@ -7,6 +7,7 @@
 
 #include <string>
 #include <vector>
+#include <cstdint>
 
 namespace reshadefx
 {
@@ -199,9 +200,15 @@ namespace reshadefx
 		vector,
 		matrix,
 		string_,
-		texture,
-		sampler,
-		storage,
+		texture1d,
+		texture2d,
+		texture3d,
+		sampler1d,
+		sampler2d,
+		sampler3d,
+		storage1d,
+		storage2d,
+		storage3d,
 
 		// preprocessor directives
 		hash_def,
@@ -239,7 +246,7 @@ namespace reshadefx
 		};
 		std::string literal_as_string;
 
-		inline operator tokenid() const { return id; }
+		operator tokenid() const { return id; }
 
 		static std::string id_to_name(tokenid id);
 	};

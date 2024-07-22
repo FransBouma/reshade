@@ -5,9 +5,7 @@
 
 #pragma once
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
-
-#include <d3d12.h>
+#if RESHADE_ADDON >= 2
 
 HRESULT STDMETHODCALLTYPE ID3D12PipelineLibrary_LoadGraphicsPipeline(ID3D12PipelineLibrary *pPipelineLibrary, LPCWSTR pName, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc, REFIID riid, void **ppPipelineState);
 HRESULT STDMETHODCALLTYPE ID3D12PipelineLibrary_LoadComputePipeline(ID3D12PipelineLibrary *pPipelineLibrary, LPCWSTR pName, const D3D12_COMPUTE_PIPELINE_STATE_DESC *pDesc, REFIID riid, void **ppPipelineState);

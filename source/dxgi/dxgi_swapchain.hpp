@@ -11,7 +11,7 @@
 struct D3D10Device;
 struct D3D11Device;
 struct D3D12CommandQueue;
-namespace reshade { class runtime; }
+namespace reshade::api { struct swapchain; }
 
 struct DECLSPEC_UUID("1F445F9F-9887-4C4C-9055-4E3BADAFCCA8") DXGISwapChain final : IDXGISwapChain4
 {
@@ -20,6 +20,7 @@ struct DECLSPEC_UUID("1F445F9F-9887-4C4C-9055-4E3BADAFCCA8") DXGISwapChain final
 	DXGISwapChain(D3D11Device *device, IDXGISwapChain  *original);
 	DXGISwapChain(D3D11Device *device, IDXGISwapChain1 *original);
 	DXGISwapChain(D3D12CommandQueue *command_queue, IDXGISwapChain3 *original);
+	~DXGISwapChain();
 
 	DXGISwapChain(const DXGISwapChain &) = delete;
 	DXGISwapChain &operator=(const DXGISwapChain &) = delete;
@@ -82,24 +83,29 @@ struct DECLSPEC_UUID("1F445F9F-9887-4C4C-9055-4E3BADAFCCA8") DXGISwapChain final
 	HRESULT STDMETHODCALLTYPE SetHDRMetaData(DXGI_HDR_METADATA_TYPE Type, UINT Size, void *pMetaData) override;
 	#pragma endregion
 
-	void runtime_reset();
-	void runtime_resize();
-	void runtime_present(UINT flags, const DXGI_PRESENT_PARAMETERS *params = nullptr);
+	void on_init();
+	void on_reset();
+	void on_present(UINT flags, [[maybe_unused]] const DXGI_PRESENT_PARAMETERS *params = nullptr);
 	void handle_device_loss(HRESULT hr);
 
 	bool check_and_upgrade_interface(REFIID riid);
 
-	LONG _ref = 1;
 	IDXGISwapChain *_orig;
-	unsigned int _interface_version;
-	IUnknown *const _direct3d_device;
-	IUnknown *const _direct3d_command_queue;
-	const unsigned int _direct3d_version;
-	std::shared_mutex _impl_mutex;
-	reshade::runtime *const _impl;
-	bool _was_still_drawing_last_frame = false;
+	LONG _ref = 1;
+	unsigned short _interface_version;
 
-	bool _force_vsync = false;
-	bool _force_windowed = false;
-	bool _force_fullscreen = false;
+	IUnknown *const _direct3d_device;
+	// The GOG Galaxy overlay scans the swap chain object memory for the D3D12 command queue, but fails if it cannot find at least two occurences of it.
+	// In that case it falls back to using the first (normal priority) direct command queue that 'ID3D12CommandQueue::ExecuteCommandLists' is called on,
+	// but if this is not the queue the swap chain was created with (DLSS Frame Generation e.g. creates a separate high priority one for presentation), D3D12 removes the device.
+	// Instead spoof a more similar layout to the original 'CDXGISwapChain' implementation, so that the GOG Galaxy overlay successfully extracts and
+	// later uses these command queue pointer offsets directly (the second of which is indexed with the back buffer index), ensuring the correct queue is used.
+	IUnknown *const _direct3d_command_queue, *_direct3d_command_queue_per_back_buffer[DXGI_MAX_SWAP_CHAIN_BUFFERS] = {};
+	const unsigned int _direct3d_version;
+
+	std::shared_mutex _impl_mutex;
+	reshade::api::swapchain *const _impl;
+	bool _is_initialized = false;
+	bool _was_still_drawing_last_frame = false;
+	BOOL _current_fullscreen_state = -1;
 };

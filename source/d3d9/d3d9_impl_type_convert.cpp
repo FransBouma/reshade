@@ -3,21 +3,19 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#include <vector>
-#include <limits>
-#include "com_ptr.hpp"
-#include "reshade_api_pipeline.hpp"
 #include "d3d9_impl_type_convert.hpp"
+#include <cassert>
+#include <cstring> // std::strcmp
 
-auto reshade::d3d9::convert_format(api::format format, BOOL lockable) -> D3DFORMAT
+auto reshade::d3d9::convert_format(api::format format, BOOL lockable, BOOL shader_usage) -> D3DFORMAT
 {
 	switch (format)
 	{
 	default:
 		assert(false);
-		[[fallthrough]];
-	case api::format::unknown:
 		break;
+	case api::format::unknown:
+		return shader_usage ? D3DFMT_UNKNOWN : static_cast<D3DFORMAT>(MAKEFOURCC('N', 'U', 'L', 'L'));
 	case api::format::r1_unorm:
 		return D3DFMT_A1; // Not a perfect fit for R1, but what can you do ...
 	case api::format::l8_unorm:
@@ -91,7 +89,7 @@ auto reshade::d3d9::convert_format(api::format format, BOOL lockable) -> D3DFORM
 	case api::format::r16g16b16a16_unorm:
 	case api::format::r16g16b16a16_snorm:
 		return D3DFMT_A16B16G16R16;
-	case api::format::r16g16b16a16_typeless:
+	case api::format::r16g16b16a16_typeless: // Do the same thing as 'format_to_default_typed' and interpret typeless as floating-point
 	case api::format::r16g16b16a16_float:
 		return D3DFMT_A16B16G16R16F;
 	case api::format::r32_uint:
@@ -123,17 +121,19 @@ auto reshade::d3d9::convert_format(api::format format, BOOL lockable) -> D3DFORM
 		return D3DFMT_X1R5G5B5;
 	case api::format::b4g4r4a4_unorm:
 		return D3DFMT_A4R4G4B4;
+	case api::format::a4b4g4r4_unorm:
+		break; // Unsupported
 	case api::format::s8_uint:
 		return lockable ? D3DFMT_S8_LOCKABLE : D3DFMT_UNKNOWN;
 	case api::format::d16_unorm:
-		return lockable ? D3DFMT_D16_LOCKABLE : D3DFMT_D16;
+		return shader_usage ? static_cast<D3DFORMAT>(MAKEFOURCC('D', 'F', '1', '6')) : lockable ? D3DFMT_D16_LOCKABLE : D3DFMT_D16;
 	case api::format::d16_unorm_s8_uint:
 		break; // Unsupported
 	case api::format::d24_unorm_x8_uint:
-		return D3DFMT_D24X8;
+		return shader_usage ? static_cast<D3DFORMAT>(MAKEFOURCC('D', 'F', '2', '4')) : D3DFMT_D24X8;
 	case api::format::r24_g8_typeless:
 	case api::format::d24_unorm_s8_uint:
-		return D3DFMT_D24S8;
+		return shader_usage ? static_cast<D3DFORMAT>(MAKEFOURCC('D', 'F', '2', '4')) : D3DFMT_D24S8;
 	case api::format::r24_unorm_x8_uint:
 	case api::format::x24_unorm_g8_uint:
 		break; // Unsupported
@@ -179,7 +179,11 @@ auto reshade::d3d9::convert_format(D3DFORMAT d3d_format, BOOL *lockable) -> api:
 	switch (static_cast<DWORD>(d3d_format))
 	{
 	default:
+		assert(false);
+		[[fallthrough]];
 	case D3DFMT_UNKNOWN:
+	case MAKEFOURCC('N', 'U', 'L', 'L'):
+	case MAKEFOURCC('N', 'V', 'C', 'S'): // Internal resource created by NVAPI
 		return api::format::unknown;
 	case D3DFMT_A1:
 		return api::format::r1_unorm;
@@ -236,8 +240,10 @@ auto reshade::d3d9::convert_format(D3DFORMAT d3d_format, BOOL *lockable) -> api:
 			*lockable = TRUE;
 		[[fallthrough]];
 	case D3DFMT_D16:
+	case MAKEFOURCC('D', 'F', '1', '6'):
 		return api::format::d16_unorm;
 	case D3DFMT_D24S8:
+	case MAKEFOURCC('D', 'F', '2', '4'):
 		return api::format::d24_unorm_s8_uint;
 	case D3DFMT_D24X8:
 		return api::format::d24_unorm_x8_uint;
@@ -338,7 +344,7 @@ void reshade::d3d9::convert_resource_usage_to_d3d_usage(api::resource_usage usag
 {
 	// Copying textures is implemented using the rasterization pipeline (see 'device_impl::copy_resource' implementation), so needs render target usage
 	// When the destination in 'IDirect3DDevice9::StretchRect' is a texture surface, it too has to have render target usage (see https://docs.microsoft.com/windows/win32/api/d3d9helper/nf-d3d9helper-idirect3ddevice9-stretchrect)
-	if ((usage & (api::resource_usage::render_target | api::resource_usage::copy_dest | api::resource_usage::resolve_dest)) != 0)
+	if ((usage & (api::resource_usage::render_target | api::resource_usage::copy_dest | api::resource_usage::resolve_dest)) != 0 && (usage & api::resource_usage::depth_stencil) == 0)
 		d3d_usage |= D3DUSAGE_RENDERTARGET;
 	else
 		d3d_usage &= ~D3DUSAGE_RENDERTARGET;
@@ -357,6 +363,47 @@ void reshade::d3d9::convert_d3d_usage_to_resource_usage(DWORD d3d_usage, api::re
 		usage |= api::resource_usage::render_target;
 	if (d3d_usage & D3DUSAGE_DEPTHSTENCIL)
 		usage |= api::resource_usage::depth_stencil;
+}
+
+void reshade::d3d9::convert_sampler_desc(const api::sampler_desc &desc, DWORD state[11])
+{
+	state[D3DSAMP_ADDRESSU] = static_cast<DWORD>(desc.address_u);
+	state[D3DSAMP_ADDRESSV] = static_cast<DWORD>(desc.address_v);
+	state[D3DSAMP_ADDRESSW] = static_cast<DWORD>(desc.address_w);
+	state[D3DSAMP_BORDERCOLOR] = D3DCOLOR_COLORVALUE(desc.border_color[0], desc.border_color[1], desc.border_color[2], desc.border_color[3]);
+	state[D3DSAMP_MAGFILTER] = ((static_cast<DWORD>(desc.filter) & 0x0C) >> 2) + 1;
+	state[D3DSAMP_MINFILTER] = ((static_cast<DWORD>(desc.filter) & 0x30) >> 4) + 1;
+	state[D3DSAMP_MIPFILTER] = ((static_cast<DWORD>(desc.filter) & 0x03)) + 1;
+	state[D3DSAMP_MIPMAPLODBIAS] = *reinterpret_cast<const DWORD *>(&desc.mip_lod_bias);
+	state[D3DSAMP_MAXMIPLEVEL] = desc.min_lod > 0 ? static_cast<DWORD>(desc.min_lod) : 0;
+	state[D3DSAMP_MAXANISOTROPY] = static_cast<DWORD>(desc.max_anisotropy);
+
+	if (desc.filter == api::filter_mode::anisotropic || desc.filter == api::filter_mode::min_mag_anisotropic_mip_point)
+	{
+		state[D3DSAMP_MAGFILTER] = D3DTEXF_ANISOTROPIC;
+		state[D3DSAMP_MINFILTER] = D3DTEXF_ANISOTROPIC;
+	}
+}
+reshade::api::sampler_desc reshade::d3d9::convert_sampler_desc(const DWORD state[11])
+{
+	reshade::api::sampler_desc desc = {};
+	desc.filter = static_cast<api::filter_mode>(
+		(state[D3DSAMP_MIPFILTER] >= D3DTEXF_LINEAR ? 0x01 : 0) |
+		(state[D3DSAMP_MAGFILTER] >= D3DTEXF_LINEAR ? 0x04 : 0) |
+		(state[D3DSAMP_MINFILTER] >= D3DTEXF_LINEAR ? 0x10 : 0) |
+		(state[D3DSAMP_MAGFILTER] == D3DTEXF_ANISOTROPIC || state[D3DSAMP_MINFILTER] == D3DTEXF_ANISOTROPIC ? 0x54 : 0));
+	desc.address_u = static_cast<api::texture_address_mode>(state[D3DSAMP_ADDRESSU]);
+	desc.address_v = static_cast<api::texture_address_mode>(state[D3DSAMP_ADDRESSV]);
+	desc.address_w = static_cast<api::texture_address_mode>(state[D3DSAMP_ADDRESSW]);
+	desc.mip_lod_bias = *reinterpret_cast<const FLOAT *>(&state[D3DSAMP_MIPMAPLODBIAS]);
+	desc.max_anisotropy = static_cast<float>(state[D3DSAMP_MAXANISOTROPY]);
+	desc.border_color[0] = ((state[D3DSAMP_BORDERCOLOR] >> 16) & 0xFF) / 255.0f;
+	desc.border_color[1] = ((state[D3DSAMP_BORDERCOLOR] >> 8) & 0xFF) / 255.0f;
+	desc.border_color[2] = ((state[D3DSAMP_BORDERCOLOR]) & 0xFF) / 255.0f;
+	desc.border_color[3] = ((state[D3DSAMP_BORDERCOLOR] >> 24) & 0xFF) / 255.0f;
+	desc.min_lod = static_cast<float>(state[D3DSAMP_MAXMIPLEVEL]);
+
+	return desc;
 }
 
 void reshade::d3d9::convert_resource_desc(const api::resource_desc &desc, D3DVOLUME_DESC &internal_desc, UINT *levels, const D3DCAPS9 &caps)
@@ -403,17 +450,16 @@ void reshade::d3d9::convert_resource_desc(const api::resource_desc &desc, D3DSUR
 	internal_desc.Width = desc.texture.width;
 	internal_desc.Height = desc.texture.height;
 
-	if (const D3DFORMAT format = convert_format(desc.texture.format, (desc.flags & api::resource_flags::dynamic) != 0);
+	if (const D3DFORMAT format = convert_format(desc.texture.format, (desc.flags & api::resource_flags::dynamic) != 0, (desc.usage & api::resource_usage::shader_resource) != 0);
 		format != D3DFMT_UNKNOWN)
 		internal_desc.Format = format;
-	else if (desc.type == api::resource_type::surface && desc.texture.format == api::format::unknown)
-		internal_desc.Format = static_cast<D3DFORMAT>(MAKEFOURCC('N', 'U', 'L', 'L'));
 
 	if (desc.texture.samples > 1)
 	{
 		if (internal_desc.MultiSampleType == D3DMULTISAMPLE_NONMASKABLE)
 		{
 			BitScanReverse(&internal_desc.MultiSampleQuality, desc.texture.samples);
+			internal_desc.MultiSampleQuality--; // Minimum bit position is at index one, convert that to a quality level of zero
 		}
 		else
 		{
@@ -482,6 +528,9 @@ void reshade::d3d9::convert_resource_desc(const api::resource_desc &desc, D3DIND
 {
 	assert(desc.type == api::resource_type::buffer);
 
+	assert(desc.buffer.stride == 0 || desc.buffer.stride == 2 || desc.buffer.stride == 4);
+	internal_desc.Format = desc.buffer.stride >= 4 ? D3DFMT_INDEX32 : D3DFMT_INDEX16;
+
 	assert(desc.buffer.size <= std::numeric_limits<UINT>::max());
 	internal_desc.Size = static_cast<UINT>(desc.buffer.size);
 
@@ -503,7 +552,7 @@ void reshade::d3d9::convert_resource_desc(const api::resource_desc &desc, D3DIND
 				internal_desc.Usage |= D3DUSAGE_WRITEONLY | D3DUSAGE_DYNAMIC;
 		}
 
-		if ((desc.flags & api::resource_flags::dynamic) != 0)
+		if ((desc.flags & api::resource_flags::dynamic) != 0 && desc.heap != api::memory_heap::unknown)
 		{
 			internal_desc.Usage |= D3DUSAGE_DYNAMIC;
 
@@ -538,7 +587,7 @@ void reshade::d3d9::convert_resource_desc(const api::resource_desc &desc, D3DVER
 				internal_desc.Usage |= D3DUSAGE_WRITEONLY | D3DUSAGE_DYNAMIC;
 		}
 
-		if ((desc.flags & api::resource_flags::dynamic) != 0)
+		if ((desc.flags & api::resource_flags::dynamic) != 0 && desc.heap != api::memory_heap::unknown)
 		{
 			internal_desc.Usage |= D3DUSAGE_DYNAMIC;
 
@@ -588,7 +637,10 @@ reshade::api::resource_desc reshade::d3d9::convert_resource_desc(const D3DSURFAC
 	if (internal_desc.MultiSampleType >= D3DMULTISAMPLE_2_SAMPLES)
 		desc.texture.samples = static_cast<uint16_t>(internal_desc.MultiSampleType);
 	else if (internal_desc.MultiSampleType == D3DMULTISAMPLE_NONMASKABLE)
-		desc.texture.samples = static_cast<uint16_t>(1 << internal_desc.MultiSampleQuality);
+		// The meanings of the quality levels are defined by the driver and do not correspond to the number of samples
+		// Multiple quality levels may use the same number of samples, but different filters for example
+		// But to be able to convert, just handle this as if there were a direct mapping (with quality level zero starting at two samples)
+		desc.texture.samples = static_cast<uint16_t>(1 << (internal_desc.MultiSampleQuality + 1));
 	else
 		desc.texture.samples = 1;
 
@@ -601,7 +653,11 @@ reshade::api::resource_desc reshade::d3d9::convert_resource_desc(const D3DSURFAC
 	{
 		switch (static_cast<DWORD>(internal_desc.Format))
 		{
-		default: // Includes INTZ, RAWZ, DF16 and DF24
+		default:
+		case MAKEFOURCC('R', 'A', 'W', 'Z'):
+		case MAKEFOURCC('D', 'F', '1', '6'):
+		case MAKEFOURCC('D', 'F', '2', '4'):
+		case MAKEFOURCC('I', 'N', 'T', 'Z'):
 			desc.usage |= api::resource_usage::shader_resource;
 			break;
 		case D3DFMT_D16_LOCKABLE:
@@ -618,7 +674,6 @@ reshade::api::resource_desc reshade::d3d9::convert_resource_desc(const D3DSURFAC
 			assert((internal_desc.Usage & D3DUSAGE_DEPTHSTENCIL) != 0);
 			// D16, D24X8 and D24S8 technically support sampling as PCF shadow maps on some GPUs, but not normal sampling, so ignore that
 			break;
-		case MAKEFOURCC('R', 'E', 'S', 'Z'):
 		case MAKEFOURCC('N', 'U', 'L', 'L'):
 			break;
 		}
@@ -642,24 +697,30 @@ reshade::api::resource_desc reshade::d3d9::convert_resource_desc(const D3DSURFAC
 		case D3DFMT_DXT3:
 		case D3DFMT_DXT4:
 		case D3DFMT_DXT5:
+		case MAKEFOURCC('A', 'T', 'I', '1'):
+		case MAKEFOURCC('A', 'T', 'I', '2'):
 			// Stretching is not supported if either surface is in a compressed format
 			break;
+		case D3DFMT_D24S8:
+		case D3DFMT_D24X8:
+		case MAKEFOURCC('D', 'F', '1', '6'):
+		case MAKEFOURCC('D', 'F', '2', '4'):
+		case MAKEFOURCC('I', 'N', 'T', 'Z'):
+			desc.usage |= api::resource_usage::resolve_dest;
+			[[fallthrough]];
 		case D3DFMT_D16_LOCKABLE:
 		case D3DFMT_D32:
 		case D3DFMT_D15S1:
-		case D3DFMT_D24S8:
-		case D3DFMT_D24X8:
 		case D3DFMT_D24X4S4:
 		case D3DFMT_D16:
 		case D3DFMT_D32F_LOCKABLE:
 		case D3DFMT_D24FS8:
 		case D3DFMT_D32_LOCKABLE:
 		case D3DFMT_S8_LOCKABLE:
-			// Stretching depth stencil surfaces is extremly limited (does not support copying from surface to texture for example), so just do not allow it
 			assert((internal_desc.Usage & D3DUSAGE_DEPTHSTENCIL) != 0);
-			break;
-		case MAKEFOURCC('R', 'E', 'S', 'Z'):
-			desc.usage |= api::resource_usage::resolve_source;
+			if (internal_desc.MultiSampleType != D3DMULTISAMPLE_NONE)
+				desc.usage |= api::resource_usage::resolve_source;
+			// Stretching depth-stencil surfaces is extremly limited (does not support copying from surface to texture for example), so just do not allow it
 			break;
 		case MAKEFOURCC('N', 'U', 'L', 'L'):
 			// Special render target format that has no memory attached, so cannot be copied
@@ -686,10 +747,12 @@ reshade::api::resource_desc reshade::d3d9::convert_resource_desc(const D3DSURFAC
 }
 reshade::api::resource_desc reshade::d3d9::convert_resource_desc(const D3DINDEXBUFFER_DESC &internal_desc, bool shared_handle)
 {
+	assert(internal_desc.Type == D3DRTYPE_INDEXBUFFER && (internal_desc.Format == D3DFMT_INDEX16 || internal_desc.Format == D3DFMT_INDEX32));
+
 	api::resource_desc desc = {};
 	desc.type = api::resource_type::buffer;
 	desc.buffer.size = internal_desc.Size;
-	desc.buffer.stride = 0;
+	desc.buffer.stride = (internal_desc.Format == D3DFMT_INDEX32) ? 4 : 2;
 	if (internal_desc.Pool == D3DPOOL_DEFAULT && (internal_desc.Usage & D3DUSAGE_WRITEONLY) == 0)
 		desc.heap = api::memory_heap::gpu_to_cpu;
 	else
@@ -709,6 +772,8 @@ reshade::api::resource_desc reshade::d3d9::convert_resource_desc(const D3DINDEXB
 }
 reshade::api::resource_desc reshade::d3d9::convert_resource_desc(const D3DVERTEXBUFFER_DESC &internal_desc, bool shared_handle)
 {
+	assert(internal_desc.Type == D3DRTYPE_VERTEXBUFFER && internal_desc.Format == D3DFMT_VERTEXDATA);
+
 	api::resource_desc desc = {};
 	desc.type = api::resource_type::buffer;
 	desc.buffer.size = internal_desc.Size;
@@ -731,249 +796,234 @@ reshade::api::resource_desc reshade::d3d9::convert_resource_desc(const D3DVERTEX
 	return desc;
 }
 
-void reshade::d3d9::convert_input_layout_desc(uint32_t count, const api::input_element *elements, std::vector<D3DVERTEXELEMENT9> &internal_elements)
+void reshade::d3d9::convert_input_element(const api::input_element &desc, D3DVERTEXELEMENT9 &internal_desc)
 {
-	assert(count <= MAXD3DDECLLENGTH);
+	assert(desc.buffer_binding <= std::numeric_limits<WORD>::max());
+	internal_desc.Stream = static_cast<WORD>(desc.buffer_binding);
+	assert(desc.offset <= std::numeric_limits<WORD>::max());
+	internal_desc.Offset = static_cast<WORD>(desc.offset);
 
-	internal_elements.reserve(count + 1);
-
-	for (uint32_t i = 0; i < count; ++i)
+	switch (desc.format)
 	{
-		const api::input_element &element = elements[i];
+	default:
+		assert(false);
+		[[fallthrough]];
+	case api::format::unknown:
+		internal_desc.Type = D3DDECLTYPE_UNUSED;
+		break;
+	case api::format::r8g8b8a8_uint:
+		internal_desc.Type = D3DDECLTYPE_UBYTE4;
+		break;
+	case api::format::r8g8b8a8_unorm:
+		internal_desc.Type = D3DDECLTYPE_UBYTE4N;
+		break;
+	case api::format::b8g8r8a8_unorm:
+		internal_desc.Type = D3DDECLTYPE_D3DCOLOR;
+		break;
+	case api::format::r10g10b10a2_uint:
+		internal_desc.Type = D3DDECLTYPE_UDEC3;
+		break;
+	case api::format::r10g10b10a2_unorm:
+		internal_desc.Type = D3DDECLTYPE_DEC3N;
+		break;
+	case api::format::r16g16_sint:
+		internal_desc.Type = D3DDECLTYPE_SHORT2;
+		break;
+	case api::format::r16g16_float:
+		internal_desc.Type = D3DDECLTYPE_FLOAT16_2;
+		break;
+	case api::format::r16g16_unorm:
+		internal_desc.Type = D3DDECLTYPE_USHORT2N;
+		break;
+	case api::format::r16g16_snorm:
+		internal_desc.Type = D3DDECLTYPE_SHORT2N;
+		break;
+	case api::format::r16g16b16a16_sint:
+		internal_desc.Type = D3DDECLTYPE_SHORT4;
+		break;
+	case api::format::r16g16b16a16_float:
+		internal_desc.Type = D3DDECLTYPE_FLOAT16_4;
+		break;
+	case api::format::r16g16b16a16_unorm:
+		internal_desc.Type = D3DDECLTYPE_USHORT4N;
+		break;
+	case api::format::r16g16b16a16_snorm:
+		internal_desc.Type = D3DDECLTYPE_SHORT4N;
+		break;
+	case api::format::r32_float:
+		internal_desc.Type = D3DDECLTYPE_FLOAT1;
+		break;
+	case api::format::r32g32_float:
+		internal_desc.Type = D3DDECLTYPE_FLOAT2;
+		break;
+	case api::format::r32g32b32_float:
+		internal_desc.Type = D3DDECLTYPE_FLOAT3;
+		break;
+	case api::format::r32g32b32a32_float:
+		internal_desc.Type = D3DDECLTYPE_FLOAT4;
+		break;
+	}
 
-		D3DVERTEXELEMENT9 &internal_element = internal_elements.emplace_back();
-
-		assert(element.buffer_binding <= std::numeric_limits<WORD>::max());
-		internal_element.Stream = static_cast<WORD>(element.buffer_binding);
-		assert(element.offset <= std::numeric_limits<WORD>::max());
-		internal_element.Offset = static_cast<WORD>(element.offset);
-
-		switch (element.format)
-		{
-		default:
-			assert(false);
-			[[fallthrough]];
-		case api::format::unknown:
-			internal_element.Type = D3DDECLTYPE_UNUSED;
-			break;
-		case api::format::r8g8b8a8_uint:
-			internal_element.Type = D3DDECLTYPE_UBYTE4;
-			break;
-		case api::format::r8g8b8a8_unorm:
-			internal_element.Type = D3DDECLTYPE_UBYTE4N;
-			break;
-		case api::format::b8g8r8a8_unorm:
-			internal_element.Type = D3DDECLTYPE_D3DCOLOR;
-			break;
-		case api::format::r10g10b10a2_uint:
-			internal_element.Type = D3DDECLTYPE_UDEC3;
-			break;
-		case api::format::r10g10b10a2_unorm:
-			internal_element.Type = D3DDECLTYPE_DEC3N;
-			break;
-		case api::format::r16g16_sint:
-			internal_element.Type = D3DDECLTYPE_SHORT2;
-			break;
-		case api::format::r16g16_float:
-			internal_element.Type = D3DDECLTYPE_FLOAT16_2;
-			break;
-		case api::format::r16g16_unorm:
-			internal_element.Type = D3DDECLTYPE_USHORT2N;
-			break;
-		case api::format::r16g16_snorm:
-			internal_element.Type = D3DDECLTYPE_SHORT2N;
-			break;
-		case api::format::r16g16b16a16_sint:
-			internal_element.Type = D3DDECLTYPE_SHORT4;
-			break;
-		case api::format::r16g16b16a16_float:
-			internal_element.Type = D3DDECLTYPE_FLOAT16_4;
-			break;
-		case api::format::r16g16b16a16_unorm:
-			internal_element.Type = D3DDECLTYPE_USHORT4N;
-			break;
-		case api::format::r16g16b16a16_snorm:
-			internal_element.Type = D3DDECLTYPE_SHORT4N;
-			break;
-		case api::format::r32_float:
-			internal_element.Type = D3DDECLTYPE_FLOAT1;
-			break;
-		case api::format::r32g32_float:
-			internal_element.Type = D3DDECLTYPE_FLOAT2;
-			break;
-		case api::format::r32g32b32_float:
-			internal_element.Type = D3DDECLTYPE_FLOAT3;
-			break;
-		case api::format::r32g32b32a32_float:
-			internal_element.Type = D3DDECLTYPE_FLOAT4;
-			break;
-		}
-
-		if (std::strcmp(element.semantic, "POSITION") == 0)
-			internal_element.Usage = D3DDECLUSAGE_POSITION;
-		else if (std::strcmp(element.semantic, "BLENDWEIGHT") == 0)
-			internal_element.Usage = D3DDECLUSAGE_BLENDWEIGHT;
-		else if (std::strcmp(element.semantic, "BLENDINDICES") == 0)
-			internal_element.Usage = D3DDECLUSAGE_BLENDINDICES;
-		else if (std::strcmp(element.semantic, "NORMAL") == 0)
-			internal_element.Usage = D3DDECLUSAGE_NORMAL;
-		else if (std::strcmp(element.semantic, "PSIZE") == 0)
-			internal_element.Usage = D3DDECLUSAGE_PSIZE;
-		else if (std::strcmp(element.semantic, "TANGENT") == 0)
-			internal_element.Usage = D3DDECLUSAGE_TANGENT;
-		else if (std::strcmp(element.semantic, "BINORMAL") == 0)
-			internal_element.Usage = D3DDECLUSAGE_BINORMAL;
-		else if (std::strcmp(element.semantic, "TESSFACTOR") == 0)
-			internal_element.Usage = D3DDECLUSAGE_TESSFACTOR;
-		else if (std::strcmp(element.semantic, "POSITIONT") == 0)
-			internal_element.Usage = D3DDECLUSAGE_POSITIONT;
-		else if (std::strcmp(element.semantic, "COLOR") == 0)
-			internal_element.Usage = D3DDECLUSAGE_COLOR;
-		else if (std::strcmp(element.semantic, "FOG") == 0)
-			internal_element.Usage = D3DDECLUSAGE_FOG;
-		else if (std::strcmp(element.semantic, "DEPTH") == 0)
-			internal_element.Usage = D3DDECLUSAGE_DEPTH;
-		else if (std::strcmp(element.semantic, "SAMPLE") == 0)
-			internal_element.Usage = D3DDECLUSAGE_SAMPLE;
+	if (desc.semantic == nullptr)
+	{
+		internal_desc.Usage = D3DDECLUSAGE_TEXCOORD;
+		assert(desc.location <= 256);
+		internal_desc.UsageIndex = static_cast<BYTE>(desc.location);
+	}
+	else
+	{
+		if (std::strcmp(desc.semantic, "POSITION") == 0)
+			internal_desc.Usage = D3DDECLUSAGE_POSITION;
+		else if (std::strcmp(desc.semantic, "BLENDWEIGHT") == 0)
+			internal_desc.Usage = D3DDECLUSAGE_BLENDWEIGHT;
+		else if (std::strcmp(desc.semantic, "BLENDINDICES") == 0)
+			internal_desc.Usage = D3DDECLUSAGE_BLENDINDICES;
+		else if (std::strcmp(desc.semantic, "NORMAL") == 0)
+			internal_desc.Usage = D3DDECLUSAGE_NORMAL;
+		else if (std::strcmp(desc.semantic, "PSIZE") == 0)
+			internal_desc.Usage = D3DDECLUSAGE_PSIZE;
+		else if (std::strcmp(desc.semantic, "TANGENT") == 0)
+			internal_desc.Usage = D3DDECLUSAGE_TANGENT;
+		else if (std::strcmp(desc.semantic, "BINORMAL") == 0)
+			internal_desc.Usage = D3DDECLUSAGE_BINORMAL;
+		else if (std::strcmp(desc.semantic, "TESSFACTOR") == 0)
+			internal_desc.Usage = D3DDECLUSAGE_TESSFACTOR;
+		else if (std::strcmp(desc.semantic, "POSITIONT") == 0)
+			internal_desc.Usage = D3DDECLUSAGE_POSITIONT;
+		else if (std::strcmp(desc.semantic, "COLOR") == 0)
+			internal_desc.Usage = D3DDECLUSAGE_COLOR;
+		else if (std::strcmp(desc.semantic, "FOG") == 0)
+			internal_desc.Usage = D3DDECLUSAGE_FOG;
+		else if (std::strcmp(desc.semantic, "DEPTH") == 0)
+			internal_desc.Usage = D3DDECLUSAGE_DEPTH;
+		else if (std::strcmp(desc.semantic, "SAMPLE") == 0)
+			internal_desc.Usage = D3DDECLUSAGE_SAMPLE;
 		else
-			internal_element.Usage = D3DDECLUSAGE_TEXCOORD;
+			internal_desc.Usage = D3DDECLUSAGE_TEXCOORD;
 
-		assert(element.semantic_index <= 256);
-		internal_element.UsageIndex = static_cast<BYTE>(element.semantic_index);
+		assert(desc.semantic_index <= 256);
+		internal_desc.UsageIndex = static_cast<BYTE>(desc.semantic_index);
 	}
-
-	internal_elements.push_back(D3DDECL_END());
 }
-std::vector<reshade::api::input_element> reshade::d3d9::convert_input_layout_desc(const D3DVERTEXELEMENT9 *internal_elements)
+reshade::api::input_element reshade::d3d9::convert_input_element(const D3DVERTEXELEMENT9 &internal_desc)
 {
-	if (internal_elements == nullptr)
-		return {};
+	api::input_element desc = {};
+	desc.buffer_binding = internal_desc.Stream;
+	desc.offset = internal_desc.Offset;
 
-	std::vector<api::input_element> elements;
-
-	for (uint32_t i = 0; internal_elements[i].Stream != 0xFF; ++i)
+	switch (internal_desc.Type)
 	{
-		api::input_element &element = elements.emplace_back();
-
-		const D3DVERTEXELEMENT9 &internal_element = internal_elements[i];
-
-		element.buffer_binding = internal_element.Stream;
-		element.offset = internal_element.Offset;
-
-		switch (internal_element.Type)
-		{
-		case D3DDECLTYPE_FLOAT1:
-			element.format = api::format::r32_float;
-			break;
-		case D3DDECLTYPE_FLOAT2:
-			element.format = api::format::r32g32_float;
-			break;
-		case D3DDECLTYPE_FLOAT3:
-			element.format = api::format::r32g32b32_float;
-			break;
-		case D3DDECLTYPE_FLOAT4:
-			element.format = api::format::r32g32b32a32_float;
-			break;
-		case D3DDECLTYPE_D3DCOLOR:
-			element.format = api::format::b8g8r8a8_unorm;
-			break;
-		case D3DDECLTYPE_UBYTE4:
-			element.format = api::format::r8g8b8a8_uint;
-			break;
-		case D3DDECLTYPE_SHORT2:
-			element.format = api::format::r16g16_sint;
-			break;
-		case D3DDECLTYPE_SHORT4:
-			element.format = api::format::r16g16b16a16_sint;
-			break;
-		case D3DDECLTYPE_UBYTE4N:
-			element.format = api::format::r8g8b8a8_unorm;
-			break;
-		case D3DDECLTYPE_SHORT2N:
-			element.format = api::format::r16g16_snorm;
-			break;
-		case D3DDECLTYPE_SHORT4N:
-			element.format = api::format::r16g16b16a16_snorm;
-			break;
-		case D3DDECLTYPE_USHORT2N:
-			element.format = api::format::r16g16_unorm;
-			break;
-		case D3DDECLTYPE_USHORT4N:
-			element.format = api::format::r16g16b16a16_unorm;
-			break;
-		case D3DDECLTYPE_UDEC3:
-			element.format = api::format::r10g10b10a2_uint;
-			break;
-		case D3DDECLTYPE_DEC3N:
-			element.format = api::format::r10g10b10a2_unorm;
-			break;
-		case D3DDECLTYPE_FLOAT16_2:
-			element.format = api::format::r16g16_float;
-			break;
-		case D3DDECLTYPE_FLOAT16_4:
-			element.format = api::format::r16g16b16a16_float;
-			break;
-		default:
-			assert(false);
-			[[fallthrough]];
-		case D3DDECLTYPE_UNUSED:
-			element.format = api::format::unknown;
-			break;
-		}
-
-		switch (internal_element.Usage)
-		{
-		case D3DDECLUSAGE_POSITION:
-			element.semantic = "POSITION";
-			break;
-		case D3DDECLUSAGE_BLENDWEIGHT:
-			element.semantic = "BLENDWEIGHT";
-			break;
-		case D3DDECLUSAGE_BLENDINDICES:
-			element.semantic = "BLENDINDICES";
-			break;
-		case D3DDECLUSAGE_NORMAL:
-			element.semantic = "NORMAL";
-			break;
-		case D3DDECLUSAGE_PSIZE:
-			element.semantic = "PSIZE";
-			break;
-		case D3DDECLUSAGE_TEXCOORD:
-			element.semantic = "TEXCOORD";
-			break;
-		case D3DDECLUSAGE_TANGENT:
-			element.semantic = "TANGENT";
-			break;
-		case D3DDECLUSAGE_BINORMAL:
-			element.semantic = "BINORMAL";
-			break;
-		case D3DDECLUSAGE_TESSFACTOR:
-			element.semantic = "TESSFACTOR";
-			break;
-		case D3DDECLUSAGE_POSITIONT:
-			element.semantic = "POSITIONT";
-			break;
-		case D3DDECLUSAGE_COLOR:
-			element.semantic = "COLOR";
-			break;
-		case D3DDECLUSAGE_FOG:
-			element.semantic = "FOG";
-			break;
-		case D3DDECLUSAGE_DEPTH:
-			element.semantic = "DEPTH";
-			break;
-		case D3DDECLUSAGE_SAMPLE:
-			element.semantic = "SAMPLE";
-			break;
-		default:
-			assert(false);
-			break;
-		}
-
-		element.semantic_index = internal_element.UsageIndex;
+	case D3DDECLTYPE_FLOAT1:
+		desc.format = api::format::r32_float;
+		break;
+	case D3DDECLTYPE_FLOAT2:
+		desc.format = api::format::r32g32_float;
+		break;
+	case D3DDECLTYPE_FLOAT3:
+		desc.format = api::format::r32g32b32_float;
+		break;
+	case D3DDECLTYPE_FLOAT4:
+		desc.format = api::format::r32g32b32a32_float;
+		break;
+	case D3DDECLTYPE_D3DCOLOR:
+		desc.format = api::format::b8g8r8a8_unorm;
+		break;
+	case D3DDECLTYPE_UBYTE4:
+		desc.format = api::format::r8g8b8a8_uint;
+		break;
+	case D3DDECLTYPE_SHORT2:
+		desc.format = api::format::r16g16_sint;
+		break;
+	case D3DDECLTYPE_SHORT4:
+		desc.format = api::format::r16g16b16a16_sint;
+		break;
+	case D3DDECLTYPE_UBYTE4N:
+		desc.format = api::format::r8g8b8a8_unorm;
+		break;
+	case D3DDECLTYPE_SHORT2N:
+		desc.format = api::format::r16g16_snorm;
+		break;
+	case D3DDECLTYPE_SHORT4N:
+		desc.format = api::format::r16g16b16a16_snorm;
+		break;
+	case D3DDECLTYPE_USHORT2N:
+		desc.format = api::format::r16g16_unorm;
+		break;
+	case D3DDECLTYPE_USHORT4N:
+		desc.format = api::format::r16g16b16a16_unorm;
+		break;
+	case D3DDECLTYPE_UDEC3:
+		desc.format = api::format::r10g10b10a2_uint;
+		break;
+	case D3DDECLTYPE_DEC3N:
+		desc.format = api::format::r10g10b10a2_unorm;
+		break;
+	case D3DDECLTYPE_FLOAT16_2:
+		desc.format = api::format::r16g16_float;
+		break;
+	case D3DDECLTYPE_FLOAT16_4:
+		desc.format = api::format::r16g16b16a16_float;
+		break;
+	default:
+		assert(false);
+		[[fallthrough]];
+	case D3DDECLTYPE_UNUSED:
+		desc.format = api::format::unknown;
+		break;
 	}
 
-	return elements;
+	switch (internal_desc.Usage)
+	{
+	case D3DDECLUSAGE_POSITION:
+		desc.semantic = "POSITION";
+		break;
+	case D3DDECLUSAGE_BLENDWEIGHT:
+		desc.semantic = "BLENDWEIGHT";
+		break;
+	case D3DDECLUSAGE_BLENDINDICES:
+		desc.semantic = "BLENDINDICES";
+		break;
+	case D3DDECLUSAGE_NORMAL:
+		desc.semantic = "NORMAL";
+		break;
+	case D3DDECLUSAGE_PSIZE:
+		desc.semantic = "PSIZE";
+		break;
+	case D3DDECLUSAGE_TEXCOORD:
+		desc.semantic = "TEXCOORD";
+		break;
+	case D3DDECLUSAGE_TANGENT:
+		desc.semantic = "TANGENT";
+		break;
+	case D3DDECLUSAGE_BINORMAL:
+		desc.semantic = "BINORMAL";
+		break;
+	case D3DDECLUSAGE_TESSFACTOR:
+		desc.semantic = "TESSFACTOR";
+		break;
+	case D3DDECLUSAGE_POSITIONT:
+		desc.semantic = "POSITIONT";
+		break;
+	case D3DDECLUSAGE_COLOR:
+		desc.semantic = "COLOR";
+		break;
+	case D3DDECLUSAGE_FOG:
+		desc.semantic = "FOG";
+		break;
+	case D3DDECLUSAGE_DEPTH:
+		desc.semantic = "DEPTH";
+		break;
+	case D3DDECLUSAGE_SAMPLE:
+		desc.semantic = "SAMPLE";
+		break;
+	default:
+		assert(false);
+		break;
+	}
+
+	desc.semantic_index = internal_desc.UsageIndex;
+
+	return desc;
 }
 
 auto reshade::d3d9::convert_blend_op(D3DBLENDOP value) -> api::blend_op
@@ -1086,7 +1136,7 @@ auto reshade::d3d9::convert_cull_mode(D3DCULL value, bool front_counter_clockwis
 {
 	if (value == D3DCULL_NONE)
 		return api::cull_mode::none;
-	return (value == D3DCULL_CCW && front_counter_clockwise) ? api::cull_mode::front : api::cull_mode::back;
+	return (value == D3DCULL_CCW) == front_counter_clockwise ? api::cull_mode::front : api::cull_mode::back;
 }
 auto reshade::d3d9::convert_cull_mode(api::cull_mode value, bool front_counter_clockwise) -> D3DCULL
 {
@@ -1147,43 +1197,43 @@ auto reshade::d3d9::convert_dynamic_state(D3DRENDERSTATETYPE value) -> api::dyna
 auto reshade::d3d9::convert_dynamic_state(api::dynamic_state value) -> D3DRENDERSTATETYPE
 {
 	static_assert(
-		(DWORD)reshade::api::dynamic_state::depth_enable                == D3DRS_ZENABLE &&
-		(DWORD)reshade::api::dynamic_state::fill_mode                   == D3DRS_FILLMODE &&
-		(DWORD)reshade::api::dynamic_state::depth_write_mask            == D3DRS_ZWRITEENABLE &&
-		(DWORD)reshade::api::dynamic_state::alpha_test_enable           == D3DRS_ALPHATESTENABLE &&
-		(DWORD)reshade::api::dynamic_state::source_color_blend_factor   == D3DRS_SRCBLEND &&
-		(DWORD)reshade::api::dynamic_state::dest_color_blend_factor     == D3DRS_DESTBLEND &&
-		(DWORD)reshade::api::dynamic_state::cull_mode                   == D3DRS_CULLMODE &&
-		(DWORD)reshade::api::dynamic_state::depth_func                  == D3DRS_ZFUNC &&
-		(DWORD)reshade::api::dynamic_state::alpha_reference_value       == D3DRS_ALPHAREF &&
-		(DWORD)reshade::api::dynamic_state::alpha_func                  == D3DRS_ALPHAFUNC &&
-		(DWORD)reshade::api::dynamic_state::blend_enable                == D3DRS_ALPHABLENDENABLE &&
-		(DWORD)reshade::api::dynamic_state::stencil_enable              == D3DRS_STENCILENABLE &&
-		(DWORD)reshade::api::dynamic_state::front_stencil_fail_op       == D3DRS_STENCILFAIL &&
-		(DWORD)reshade::api::dynamic_state::front_stencil_depth_fail_op == D3DRS_STENCILZFAIL &&
-		(DWORD)reshade::api::dynamic_state::front_stencil_pass_op       == D3DRS_STENCILPASS &&
-		(DWORD)reshade::api::dynamic_state::front_stencil_func          == D3DRS_STENCILFUNC &&
-		(DWORD)reshade::api::dynamic_state::stencil_reference_value     == D3DRS_STENCILREF &&
-		(DWORD)reshade::api::dynamic_state::stencil_read_mask           == D3DRS_STENCILMASK &&
-		(DWORD)reshade::api::dynamic_state::stencil_write_mask          == D3DRS_STENCILWRITEMASK &&
-		(DWORD)reshade::api::dynamic_state::depth_clip_enable           == D3DRS_CLIPPING &&
-		(DWORD)reshade::api::dynamic_state::multisample_enable          == D3DRS_MULTISAMPLEANTIALIAS &&
-		(DWORD)reshade::api::dynamic_state::sample_mask                 == D3DRS_MULTISAMPLEMASK &&
-		(DWORD)reshade::api::dynamic_state::render_target_write_mask    == D3DRS_COLORWRITEENABLE &&
-		(DWORD)reshade::api::dynamic_state::color_blend_op              == D3DRS_BLENDOP &&
-		(DWORD)reshade::api::dynamic_state::scissor_enable              == D3DRS_SCISSORTESTENABLE &&
-		(DWORD)reshade::api::dynamic_state::depth_bias_slope_scaled     == D3DRS_SLOPESCALEDEPTHBIAS &&
-		(DWORD)reshade::api::dynamic_state::antialiased_line_enable     == D3DRS_ANTIALIASEDLINEENABLE &&
-		(DWORD)reshade::api::dynamic_state::back_stencil_fail_op        == D3DRS_CCW_STENCILFAIL &&
-		(DWORD)reshade::api::dynamic_state::back_stencil_depth_fail_op  == D3DRS_CCW_STENCILZFAIL &&
-		(DWORD)reshade::api::dynamic_state::back_stencil_pass_op        == D3DRS_CCW_STENCILPASS &&
-		(DWORD)reshade::api::dynamic_state::back_stencil_func           == D3DRS_CCW_STENCILFUNC &&
-		(DWORD)reshade::api::dynamic_state::blend_constant              == D3DRS_BLENDFACTOR &&
-		(DWORD)reshade::api::dynamic_state::srgb_write_enable           == D3DRS_SRGBWRITEENABLE &&
-		(DWORD)reshade::api::dynamic_state::depth_bias                  == D3DRS_DEPTHBIAS &&
-		(DWORD)reshade::api::dynamic_state::source_alpha_blend_factor   == D3DRS_SRCBLENDALPHA &&
-		(DWORD)reshade::api::dynamic_state::dest_alpha_blend_factor     == D3DRS_DESTBLENDALPHA &&
-		(DWORD)reshade::api::dynamic_state::alpha_blend_op              == D3DRS_BLENDOPALPHA);
+		(DWORD)reshade::api::dynamic_state::depth_enable                  == D3DRS_ZENABLE &&
+		(DWORD)reshade::api::dynamic_state::fill_mode                     == D3DRS_FILLMODE &&
+		(DWORD)reshade::api::dynamic_state::depth_write_mask              == D3DRS_ZWRITEENABLE &&
+		(DWORD)reshade::api::dynamic_state::alpha_test_enable             == D3DRS_ALPHATESTENABLE &&
+		(DWORD)reshade::api::dynamic_state::source_color_blend_factor     == D3DRS_SRCBLEND &&
+		(DWORD)reshade::api::dynamic_state::dest_color_blend_factor       == D3DRS_DESTBLEND &&
+		(DWORD)reshade::api::dynamic_state::cull_mode                     == D3DRS_CULLMODE &&
+		(DWORD)reshade::api::dynamic_state::depth_func                    == D3DRS_ZFUNC &&
+		(DWORD)reshade::api::dynamic_state::alpha_reference_value         == D3DRS_ALPHAREF &&
+		(DWORD)reshade::api::dynamic_state::alpha_func                    == D3DRS_ALPHAFUNC &&
+		(DWORD)reshade::api::dynamic_state::blend_enable                  == D3DRS_ALPHABLENDENABLE &&
+		(DWORD)reshade::api::dynamic_state::stencil_enable                == D3DRS_STENCILENABLE &&
+		(DWORD)reshade::api::dynamic_state::front_stencil_fail_op         == D3DRS_STENCILFAIL &&
+		(DWORD)reshade::api::dynamic_state::front_stencil_depth_fail_op   == D3DRS_STENCILZFAIL &&
+		(DWORD)reshade::api::dynamic_state::front_stencil_pass_op         == D3DRS_STENCILPASS &&
+		(DWORD)reshade::api::dynamic_state::front_stencil_func            == D3DRS_STENCILFUNC &&
+		(DWORD)reshade::api::dynamic_state::front_stencil_reference_value == D3DRS_STENCILREF &&
+		(DWORD)reshade::api::dynamic_state::front_stencil_read_mask       == D3DRS_STENCILMASK &&
+		(DWORD)reshade::api::dynamic_state::front_stencil_write_mask      == D3DRS_STENCILWRITEMASK &&
+		(DWORD)reshade::api::dynamic_state::depth_clip_enable             == D3DRS_CLIPPING &&
+		(DWORD)reshade::api::dynamic_state::multisample_enable            == D3DRS_MULTISAMPLEANTIALIAS &&
+		(DWORD)reshade::api::dynamic_state::sample_mask                   == D3DRS_MULTISAMPLEMASK &&
+		(DWORD)reshade::api::dynamic_state::render_target_write_mask      == D3DRS_COLORWRITEENABLE &&
+		(DWORD)reshade::api::dynamic_state::color_blend_op                == D3DRS_BLENDOP &&
+		(DWORD)reshade::api::dynamic_state::scissor_enable                == D3DRS_SCISSORTESTENABLE &&
+		(DWORD)reshade::api::dynamic_state::depth_bias_slope_scaled       == D3DRS_SLOPESCALEDEPTHBIAS &&
+		(DWORD)reshade::api::dynamic_state::antialiased_line_enable       == D3DRS_ANTIALIASEDLINEENABLE &&
+		(DWORD)reshade::api::dynamic_state::back_stencil_fail_op          == D3DRS_CCW_STENCILFAIL &&
+		(DWORD)reshade::api::dynamic_state::back_stencil_depth_fail_op    == D3DRS_CCW_STENCILZFAIL &&
+		(DWORD)reshade::api::dynamic_state::back_stencil_pass_op          == D3DRS_CCW_STENCILPASS &&
+		(DWORD)reshade::api::dynamic_state::back_stencil_func             == D3DRS_CCW_STENCILFUNC &&
+		(DWORD)reshade::api::dynamic_state::blend_constant                == D3DRS_BLENDFACTOR &&
+		(DWORD)reshade::api::dynamic_state::srgb_write_enable             == D3DRS_SRGBWRITEENABLE &&
+		(DWORD)reshade::api::dynamic_state::depth_bias                    == D3DRS_DEPTHBIAS &&
+		(DWORD)reshade::api::dynamic_state::source_alpha_blend_factor     == D3DRS_SRCBLENDALPHA &&
+		(DWORD)reshade::api::dynamic_state::dest_alpha_blend_factor       == D3DRS_DESTBLENDALPHA &&
+		(DWORD)reshade::api::dynamic_state::alpha_blend_op                == D3DRS_BLENDOPALPHA);
 
 	return static_cast<D3DRENDERSTATETYPE>(value);
 }

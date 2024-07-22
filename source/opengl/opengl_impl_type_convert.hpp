@@ -6,6 +6,9 @@
 #pragma once
 
 #include <GL/glcorearb.h>
+#include "reshade_api_pipeline.hpp"
+#include <vector>
+#include <limits>
 
 namespace reshade::opengl
 {
@@ -14,8 +17,9 @@ namespace reshade::opengl
 		void apply(api::pipeline_stage stages) const;
 
 		GLuint program;
-		GLuint vao;
+
 		std::vector<api::input_element> input_elements;
+		api::primitive_topology topology;
 
 		// Blend state
 
@@ -31,6 +35,7 @@ namespace reshade::opengl
 		GLenum logic_op;
 		GLfloat blend_constant[4];
 		GLboolean color_write_mask[8][4];
+		GLbitfield sample_mask;
 
 		// Rasterizer state
 
@@ -48,24 +53,23 @@ namespace reshade::opengl
 		GLboolean depth_mask;
 		GLenum depth_func;
 		GLboolean stencil_test;
-		GLuint stencil_read_mask;
-		GLuint stencil_write_mask;
-		GLint  stencil_reference_value;
+		GLuint front_stencil_read_mask;
+		GLuint front_stencil_write_mask;
+		GLint  front_stencil_reference_value;
+		GLenum front_stencil_func;
 		GLenum front_stencil_op_fail;
 		GLenum front_stencil_op_depth_fail;
 		GLenum front_stencil_op_pass;
-		GLenum front_stencil_func;
+		GLuint back_stencil_read_mask;
+		GLuint back_stencil_write_mask;
+		GLint  back_stencil_reference_value;
+		GLenum back_stencil_func;
 		GLenum back_stencil_op_fail;
 		GLenum back_stencil_op_depth_fail;
 		GLenum back_stencil_op_pass;
-		GLenum back_stencil_func;
-
-		GLbitfield sample_mask;
-		GLenum prim_mode;
-		GLuint patch_vertices;
 	};
 
-	struct descriptor_set_impl
+	struct descriptor_table_impl
 	{
 		api::descriptor_type type;
 		uint32_t count;
@@ -78,20 +82,24 @@ namespace reshade::opengl
 		std::vector<api::descriptor_range> ranges;
 	};
 
-	struct query_pool_impl
+	struct query_heap_impl
 	{
 		std::vector<GLuint> queries;
 	};
 
-	constexpr api::pipeline_layout global_pipeline_layout = { 0xFFFFFFFFFFFFFFFF };
+	struct fence_impl
+	{
+		uint64_t current_value;
+		GLsync sync_objects[8];
+	};
 
-	inline auto make_resource_handle(GLenum target, GLuint object) -> api::resource
+	constexpr auto make_resource_handle(GLenum target, GLuint object) -> api::resource
 	{
 		if (!object)
 			return { 0 };
 		return { (static_cast<uint64_t>(target) << 40) | object };
 	}
-	inline auto make_resource_view_handle(GLenum target, GLuint object, bool standalone_object = false) -> api::resource_view
+	constexpr auto make_resource_view_handle(GLenum target, GLuint object, bool standalone_object = false) -> api::resource_view
 	{
 		return { (static_cast<uint64_t>(target) << 40) | (static_cast<uint64_t>(standalone_object ? 0x1 : 0) << 32) | object };
 	}
@@ -103,19 +111,17 @@ namespace reshade::opengl
 	auto convert_upload_format(api::format format, GLenum &type) -> GLenum;
 	auto convert_upload_format(GLenum format, GLenum type) -> api::format;
 	auto convert_attrib_format(api::format format, GLint &size, GLboolean &normalized) -> GLenum;
+	auto convert_attrib_format(GLint size, GLenum type, GLboolean normalized) -> api::format;
 	auto convert_sized_internal_format(GLenum internal_format) -> GLenum;
 
 	auto is_depth_stencil_format(api::format format) -> GLenum;
 
-	void convert_memory_usage_to_flags(GLenum usage, GLbitfield &flags);
-	void convert_memory_flags_to_usage(GLbitfield flags, GLenum &usage);
-
 	auto convert_access_flags(api::map_access flags) -> GLbitfield;
 	api::map_access convert_access_flags(GLbitfield flags);
 
-	void convert_resource_desc(const api::resource_desc &desc, GLsizeiptr &buffer_size, GLenum &usage);
+	void convert_resource_desc(const api::resource_desc &desc, GLsizeiptr &buffer_size, GLbitfield &storage_flags);
 	api::resource_type convert_resource_type(GLenum target);
-	api::resource_desc convert_resource_desc(GLenum target, GLsizeiptr buffer_size, GLenum usage);
+	api::resource_desc convert_resource_desc(GLenum target, GLsizeiptr buffer_size, GLbitfield storage_flags);
 	api::resource_desc convert_resource_desc(GLenum target, GLsizei levels, GLsizei samples, GLenum internal_format, GLsizei width, GLsizei height = 1, GLsizei depth = 1, const GLint swizzle_mask[4] = nullptr);
 
 	api::resource_view_type convert_resource_view_type(GLenum target);

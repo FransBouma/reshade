@@ -6,12 +6,16 @@
 #pragma once
 
 #include <d3d12.h>
+#include "reshade_api_pipeline.hpp"
+#include <vector>
+#include <limits>
 
 namespace reshade::d3d12
 {
 	static_assert(sizeof(D3D12_BOX) == sizeof(api::subresource_box));
 	static_assert(sizeof(D3D12_RECT) == sizeof(api::rect));
 	static_assert(sizeof(D3D12_VIEWPORT) == sizeof(api::viewport));
+	static_assert(sizeof(D3D12_GPU_DESCRIPTOR_HANDLE) == sizeof(api::descriptor_table));
 
 	struct pipeline_extra_data
 	{
@@ -24,11 +28,19 @@ namespace reshade::d3d12
 		const std::pair<D3D12_DESCRIPTOR_HEAP_TYPE, UINT> *ranges;
 	};
 
+	struct query_heap_extra_data
+	{
+		UINT size;
+		ID3D12Resource *readback_resource;
+		std::pair<ID3D12Fence *, UINT64> *fences;
+	};
+
 	extern const GUID extra_data_guid;
 
 	auto convert_format(api::format format) -> DXGI_FORMAT;
 	auto convert_format(DXGI_FORMAT format) -> api::format;
 
+	auto convert_color_space(api::color_space type) -> DXGI_COLOR_SPACE_TYPE;
 	auto convert_color_space(DXGI_COLOR_SPACE_TYPE type) -> api::color_space;
 
 	auto convert_access_to_usage(D3D12_BARRIER_ACCESS access) -> api::resource_usage;
@@ -40,8 +52,12 @@ namespace reshade::d3d12
 
 	void convert_sampler_desc(const api::sampler_desc &desc, D3D12_SAMPLER_DESC &internal_desc);
 	void convert_sampler_desc(const api::sampler_desc &desc, D3D12_SAMPLER_DESC2 &internal_desc);
+	void convert_sampler_desc(const api::sampler_desc &desc, D3D12_STATIC_SAMPLER_DESC &internal_desc);
+	void convert_sampler_desc(const api::sampler_desc &desc, D3D12_STATIC_SAMPLER_DESC1 &internal_desc);
 	api::sampler_desc convert_sampler_desc(const D3D12_SAMPLER_DESC &internal_desc);
 	api::sampler_desc convert_sampler_desc(const D3D12_SAMPLER_DESC2 &internal_desc);
+	api::sampler_desc convert_sampler_desc(const D3D12_STATIC_SAMPLER_DESC &internal_desc);
+	api::sampler_desc convert_sampler_desc(const D3D12_STATIC_SAMPLER_DESC1 &internal_desc);
 
 	void convert_resource_desc(const api::resource_desc &desc, D3D12_RESOURCE_DESC &internal_desc, D3D12_HEAP_PROPERTIES &heap_props, D3D12_HEAP_FLAGS &heap_flags);
 	void convert_resource_desc(const api::resource_desc &desc, D3D12_RESOURCE_DESC1 &internal_desc, D3D12_HEAP_PROPERTIES &heap_props, D3D12_HEAP_FLAGS &heap_flags);
@@ -64,6 +80,7 @@ namespace reshade::d3d12
 	void convert_resource_view_desc(const api::resource_view_desc &desc, D3D12_RENDER_TARGET_VIEW_DESC &internal_desc);
 	void convert_resource_view_desc(const api::resource_view_desc &desc, D3D12_SHADER_RESOURCE_VIEW_DESC &internal_desc);
 	void convert_resource_view_desc(const api::resource_view_desc &desc, D3D12_UNORDERED_ACCESS_VIEW_DESC &internal_desc);
+	api::resource_view_desc convert_resource_view_desc(const D3D12_RESOURCE_DESC &resource_desc);
 	api::resource_view_desc convert_resource_view_desc(const D3D12_DEPTH_STENCIL_VIEW_DESC &internal_desc);
 	api::resource_view_desc convert_resource_view_desc(const D3D12_RENDER_TARGET_VIEW_DESC &internal_desc);
 	api::resource_view_desc convert_resource_view_desc(const D3D12_SHADER_RESOURCE_VIEW_DESC &internal_desc);
@@ -72,19 +89,25 @@ namespace reshade::d3d12
 	void convert_shader_desc(const api::shader_desc &desc, D3D12_SHADER_BYTECODE &internal_desc);
 	api::shader_desc convert_shader_desc(const D3D12_SHADER_BYTECODE &internal_desc);
 
-	void convert_input_layout_desc(uint32_t count, const api::input_element *elements, std::vector<D3D12_INPUT_ELEMENT_DESC> &internal_elements);
-	std::vector<api::input_element> convert_input_layout_desc(UINT count, const D3D12_INPUT_ELEMENT_DESC *internal_elements);
+	void convert_input_element(const api::input_element &desc, D3D12_INPUT_ELEMENT_DESC &internal_desc);
+	api::input_element convert_input_element(const D3D12_INPUT_ELEMENT_DESC &internal_desc);
 
 	void convert_stream_output_desc(const api::stream_output_desc &desc, D3D12_STREAM_OUTPUT_DESC &internal_desc);
 	api::stream_output_desc convert_stream_output_desc(const D3D12_STREAM_OUTPUT_DESC &internal_desc);
 	void convert_blend_desc(const api::blend_desc &desc, D3D12_BLEND_DESC &internal_desc);
 	api::blend_desc convert_blend_desc(const D3D12_BLEND_DESC &internal_desc);
 	void convert_rasterizer_desc(const api::rasterizer_desc &desc, D3D12_RASTERIZER_DESC &internal_desc);
+	void convert_rasterizer_desc(const api::rasterizer_desc &desc, D3D12_RASTERIZER_DESC1 &internal_desc);
+	void convert_rasterizer_desc(const api::rasterizer_desc &desc, D3D12_RASTERIZER_DESC2 &internal_desc);
 	api::rasterizer_desc convert_rasterizer_desc(const D3D12_RASTERIZER_DESC &internal_desc);
+	api::rasterizer_desc convert_rasterizer_desc(const D3D12_RASTERIZER_DESC1 &internal_desc);
+	api::rasterizer_desc convert_rasterizer_desc(const D3D12_RASTERIZER_DESC2 &internal_desc);
 	void convert_depth_stencil_desc(const api::depth_stencil_desc &desc, D3D12_DEPTH_STENCIL_DESC &internal_desc);
 	void convert_depth_stencil_desc(const api::depth_stencil_desc &desc, D3D12_DEPTH_STENCIL_DESC1 &internal_desc);
+	void convert_depth_stencil_desc(const api::depth_stencil_desc &desc, D3D12_DEPTH_STENCIL_DESC2 &internal_desc);
 	api::depth_stencil_desc convert_depth_stencil_desc(const D3D12_DEPTH_STENCIL_DESC &internal_desc);
 	api::depth_stencil_desc convert_depth_stencil_desc(const D3D12_DEPTH_STENCIL_DESC1 &internal_desc);
+	api::depth_stencil_desc convert_depth_stencil_desc(const D3D12_DEPTH_STENCIL_DESC2 &internal_desc);
 
 	auto convert_logic_op(api::logic_op value) -> D3D12_LOGIC_OP;
 	auto convert_logic_op(D3D12_LOGIC_OP value) -> api::logic_op;
@@ -114,19 +137,36 @@ namespace reshade::d3d12
 	auto convert_descriptor_type(D3D12_DESCRIPTOR_RANGE_TYPE type) -> api::descriptor_type;
 	auto convert_descriptor_type_to_heap_type(api::descriptor_type type) -> D3D12_DESCRIPTOR_HEAP_TYPE;
 
-	auto convert_shader_visibility(D3D12_SHADER_VISIBILITY visibility) -> api::shader_stage;
+	auto convert_shader_visibility(api::shader_stage value) -> D3D12_SHADER_VISIBILITY;
+	auto convert_shader_visibility(D3D12_SHADER_VISIBILITY value) -> api::shader_stage;
 
 	auto convert_render_pass_load_op(api::render_pass_load_op value) -> D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE;
 	auto convert_render_pass_load_op(D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE value) -> api::render_pass_load_op;
 	auto convert_render_pass_store_op(api::render_pass_store_op value) -> D3D12_RENDER_PASS_ENDING_ACCESS_TYPE;
 	auto convert_render_pass_store_op(D3D12_RENDER_PASS_ENDING_ACCESS_TYPE value) -> api::render_pass_store_op;
 
+	auto convert_fence_flags(api::fence_flags value) -> D3D12_FENCE_FLAGS;
+
+	auto convert_pipeline_flags(api::pipeline_flags value) -> D3D12_RAYTRACING_PIPELINE_FLAGS;
+	auto convert_pipeline_flags(D3D12_RAYTRACING_PIPELINE_FLAGS value) -> api::pipeline_flags;
+	auto convert_acceleration_structure_type(api::acceleration_structure_type value) -> D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE;
+	auto convert_acceleration_structure_type(D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE value) -> api::acceleration_structure_type;
+	auto convert_acceleration_structure_copy_mode(api::acceleration_structure_copy_mode value) -> D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE;
+	auto convert_acceleration_structure_copy_mode(D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE value) -> api::acceleration_structure_copy_mode;
+	auto convert_acceleration_structure_build_flags(api::acceleration_structure_build_flags value, api::acceleration_structure_build_mode mode) -> D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS;
+	auto convert_acceleration_structure_build_flags(D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS value) -> api::acceleration_structure_build_flags;
+
+	void convert_acceleration_structure_build_input(const api::acceleration_structure_build_input &build_input, D3D12_RAYTRACING_GEOMETRY_DESC &geometry);
+	api::acceleration_structure_build_input convert_acceleration_structure_build_input(const D3D12_RAYTRACING_GEOMETRY_DESC &geometry);
+
 	inline auto to_handle(ID3D12Resource *ptr) { return api::resource { reinterpret_cast<uintptr_t>(ptr) }; }
 	inline auto to_handle(D3D12_CPU_DESCRIPTOR_HANDLE handle) { return api::resource_view { static_cast<uint64_t>(handle.ptr) }; }
 	inline auto to_handle(ID3D12PipelineState *ptr) { return api::pipeline { reinterpret_cast<uintptr_t>(ptr) }; }
+	inline auto to_handle(ID3D12StateObject *ptr) { return api::pipeline { reinterpret_cast<uintptr_t>(ptr) }; }
 	inline auto to_handle(ID3D12RootSignature *ptr) { return api::pipeline_layout { reinterpret_cast<uintptr_t>(ptr) }; }
-	inline auto to_handle(ID3D12QueryHeap *ptr) { return api::query_pool { reinterpret_cast<uintptr_t>(ptr) }; }
-	inline auto to_handle(ID3D12DescriptorHeap *ptr) { return api::descriptor_pool { reinterpret_cast<uintptr_t>(ptr) }; }
+	inline auto to_handle(ID3D12QueryHeap *ptr) { return api::query_heap { reinterpret_cast<uintptr_t>(ptr) }; }
+	inline auto to_handle(ID3D12DescriptorHeap *ptr) { return api::descriptor_heap { reinterpret_cast<uintptr_t>(ptr) }; }
+	inline auto to_handle(ID3D12Fence *ptr) { return api::fence { reinterpret_cast<uintptr_t>(ptr) }; }
 }
 
 #pragma warning(push)
@@ -134,6 +174,9 @@ namespace reshade::d3d12
 template <D3D12_PIPELINE_STATE_SUBOBJECT_TYPE Type, typename T>
 struct alignas(void *) D3D12_PIPELINE_STATE_STREAM
 {
+	D3D12_PIPELINE_STATE_STREAM() {}
+	D3D12_PIPELINE_STATE_STREAM(const T &data) : data(data) {}
+
 	D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type = Type;
 	T data = {};
 };
@@ -164,3 +207,6 @@ typedef D3D12_PIPELINE_STATE_STREAM<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_ST
 typedef D3D12_PIPELINE_STATE_STREAM<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VIEW_INSTANCING, D3D12_VIEW_INSTANCING_DESC> D3D12_PIPELINE_STATE_STREAM_VIEW_INSTANCING;
 typedef D3D12_PIPELINE_STATE_STREAM<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS, D3D12_SHADER_BYTECODE> D3D12_PIPELINE_STATE_STREAM_AS;
 typedef D3D12_PIPELINE_STATE_STREAM<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS, D3D12_SHADER_BYTECODE> D3D12_PIPELINE_STATE_STREAM_MS;
+typedef D3D12_PIPELINE_STATE_STREAM<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL2, D3D12_DEPTH_STENCIL_DESC2> D3D12_PIPELINE_STATE_STREAM_DEPTH_STENCIL2;
+typedef D3D12_PIPELINE_STATE_STREAM<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER1, D3D12_RASTERIZER_DESC1> D3D12_PIPELINE_STATE_STREAM_RASTERIZER1;
+typedef D3D12_PIPELINE_STATE_STREAM<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER2, D3D12_RASTERIZER_DESC2> D3D12_PIPELINE_STATE_STREAM_RASTERIZER2;

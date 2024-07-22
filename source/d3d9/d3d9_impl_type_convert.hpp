@@ -6,6 +6,10 @@
 #pragma once
 
 #include <d3d9.h>
+#include "com_ptr.hpp"
+#include "reshade_api_pipeline.hpp"
+#include <vector>
+#include <limits>
 
 namespace reshade::d3d9
 {
@@ -14,7 +18,7 @@ namespace reshade::d3d9
 
 	struct sampler_impl
 	{
-		DWORD state[12];
+		DWORD state[11];
 	};
 
 	struct pipeline_impl
@@ -23,7 +27,7 @@ namespace reshade::d3d9
 		D3DPRIMITIVETYPE prim_type;
 	};
 
-	struct descriptor_set_impl
+	struct descriptor_table_impl
 	{
 		api::descriptor_type type;
 		uint32_t count;
@@ -36,15 +40,19 @@ namespace reshade::d3d9
 		std::vector<api::descriptor_range> ranges;
 	};
 
-	struct query_pool_impl
+	struct query_heap_impl
 	{
 		api::query_type type;
 		std::vector<com_ptr<IDirect3DQuery9>> queries;
 	};
 
-	constexpr api::pipeline_layout global_pipeline_layout = { 0xFFFFFFFFFFFFFFFF };
+	struct fence_impl
+	{
+		uint64_t current_value;
+		com_ptr<IDirect3DQuery9> event_queries[8];
+	};
 
-	auto convert_format(api::format format, BOOL lockable = FALSE) -> D3DFORMAT;
+	auto convert_format(api::format format, BOOL lockable = FALSE, BOOL shader_usage = FALSE) -> D3DFORMAT;
 	auto convert_format(D3DFORMAT d3d_format, BOOL *lockable = nullptr) -> api::format;
 
 	void convert_memory_heap_to_d3d_pool(api::memory_heap heap, D3DPOOL &d3d_pool);
@@ -56,6 +64,9 @@ namespace reshade::d3d9
 	auto convert_access_flags(api::map_access access) -> DWORD;
 	api::map_access convert_access_flags(DWORD lock_flags);
 
+	void convert_sampler_desc(const api::sampler_desc &desc, DWORD state[11]);
+	api::sampler_desc convert_sampler_desc(const DWORD state[11]);
+
 	void convert_resource_desc(const api::resource_desc &desc, D3DVOLUME_DESC &internal_desc, UINT *levels, const D3DCAPS9 &caps);
 	void convert_resource_desc(const api::resource_desc &desc, D3DSURFACE_DESC &internal_desc, UINT *levels, BOOL *lockable, const D3DCAPS9 &caps);
 	void convert_resource_desc(const api::resource_desc &desc, D3DINDEXBUFFER_DESC &internal_desc);
@@ -65,8 +76,8 @@ namespace reshade::d3d9
 	api::resource_desc convert_resource_desc(const D3DINDEXBUFFER_DESC &internal_desc, bool shared_handle = false);
 	api::resource_desc convert_resource_desc(const D3DVERTEXBUFFER_DESC &internal_desc, bool shared_handle = false);
 
-	void convert_input_layout_desc(uint32_t count, const api::input_element *elements, std::vector<D3DVERTEXELEMENT9> &internal_elements);
-	std::vector<api::input_element> convert_input_layout_desc(const D3DVERTEXELEMENT9 *internal_elements);
+	void convert_input_element(const api::input_element &desc, D3DVERTEXELEMENT9 &internal_desc);
+	api::input_element convert_input_element(const D3DVERTEXELEMENT9 &internal_desc);
 
 	auto convert_blend_op(D3DBLENDOP value) -> api::blend_op;
 	auto convert_blend_op(api::blend_op value) -> D3DBLENDOP;

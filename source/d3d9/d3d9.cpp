@@ -7,8 +7,8 @@
 #include "d3d9_swapchain.hpp"
 #include "d3d9_impl_type_convert.hpp"
 #include "dll_log.hpp" // Include late to get HRESULT log overloads
-#include "ini_file.hpp"
 #include "hook_manager.hpp"
+#include "addon_manager.hpp"
 
 // These are defined in d3d9.h, but are used as function names below
 #undef IDirect3D9_CreateDevice
@@ -82,36 +82,37 @@ void dump_and_modify_present_parameters(D3DPRESENT_PARAMETERS &pp, IDirect3D9 *d
 	else
 		desc.back_buffer.texture.samples = 1;
 
-	const HWND hwnd = (pp.hDeviceWindow != nullptr) ? pp.hDeviceWindow : focus_window;
+	const HWND window = (pp.hDeviceWindow != nullptr) ? pp.hDeviceWindow : focus_window;
 
 	if (pp.Windowed)
 	{
 		RECT window_rect = {};
-		GetClientRect(hwnd, &window_rect);
+		GetClientRect(window, &window_rect);
 		if (pp.BackBufferWidth == 0)
 			desc.back_buffer.texture.width = window_rect.right;
 		if (pp.BackBufferHeight == 0)
 			desc.back_buffer.texture.height = window_rect.bottom;
 
-		if (pp.BackBufferFormat == D3DFMT_UNKNOWN)
+		if (D3DDISPLAYMODE current_mode;
+			pp.BackBufferFormat == D3DFMT_UNKNOWN &&
+			SUCCEEDED(d3d->GetAdapterDisplayMode(adapter_index, &current_mode)))
 		{
-			D3DDISPLAYMODE current_mode;
-			if (SUCCEEDED(d3d->GetAdapterDisplayMode(adapter_index, &current_mode)))
-			{
-				desc.back_buffer.texture.format = reshade::d3d9::convert_format(current_mode.Format);
-			}
+			desc.back_buffer.texture.format = reshade::d3d9::convert_format(current_mode.Format);
 		}
 	}
 
 	desc.back_buffer_count = pp.BackBufferCount;
 	desc.present_mode = pp.SwapEffect;
 	desc.present_flags = pp.Flags;
+	desc.fullscreen_state = pp.Windowed == FALSE;
+	desc.fullscreen_refresh_rate = static_cast<float>(pp.FullScreen_RefreshRateInHz);
 
-	if (reshade::invoke_addon_event<reshade::addon_event::create_swapchain>(desc, hwnd))
+	if (reshade::invoke_addon_event<reshade::addon_event::create_swapchain>(desc, window))
 	{
 		pp.BackBufferWidth = desc.back_buffer.texture.width;
 		pp.BackBufferHeight = desc.back_buffer.texture.height;
 		pp.BackBufferFormat = reshade::d3d9::convert_format(desc.back_buffer.texture.format);
+		pp.BackBufferCount = desc.back_buffer_count;
 
 		if (desc.back_buffer.texture.samples > 1)
 		{
@@ -131,56 +132,35 @@ void dump_and_modify_present_parameters(D3DPRESENT_PARAMETERS &pp, IDirect3D9 *d
 			pp.MultiSampleQuality = 0;
 		}
 
-		pp.BackBufferCount = desc.back_buffer_count;
 		pp.SwapEffect = static_cast<D3DSWAPEFFECT>(desc.present_mode);
 		pp.Flags = desc.present_flags;
+
+		if (!desc.fullscreen_state)
+		{
+			pp.Windowed = TRUE;
+			pp.FullScreen_RefreshRateInHz = 0;
+		}
+		else
+		{
+			pp.Windowed = FALSE;
+			pp.FullScreen_RefreshRateInHz = static_cast<UINT>(desc.fullscreen_refresh_rate);
+
+			// Use default values when not provided
+			if (D3DDISPLAYMODE current_mode;
+				SUCCEEDED(d3d->GetAdapterDisplayMode(adapter_index, &current_mode)))
+			{
+				if (desc.back_buffer.texture.width == 0)
+					pp.BackBufferWidth = current_mode.Width;
+				if (desc.back_buffer.texture.height == 0)
+					pp.BackBufferHeight = current_mode.Height;
+				if (desc.back_buffer.texture.format == reshade::api::format::unknown)
+					pp.BackBufferFormat = current_mode.Format;
+				if (desc.fullscreen_refresh_rate == 0)
+					pp.FullScreen_RefreshRateInHz = current_mode.RefreshRate;
+			}
+		}
 	}
 #endif
-
-	ini_file &config = reshade::global_config();
-
-	if (config.get("APP", "ForceVSync"))
-	{
-		pp.PresentationInterval = D3DPRESENT_INTERVAL_ONE;
-	}
-
-	if (config.get("APP", "ForceWindowed"))
-	{
-		pp.Windowed = TRUE;
-		pp.FullScreen_RefreshRateInHz = 0;
-	}
-	if (config.get("APP", "ForceFullscreen"))
-	{
-		D3DDISPLAYMODE current_mode;
-		if (SUCCEEDED(d3d->GetAdapterDisplayMode(adapter_index, &current_mode)))
-		{
-			pp.BackBufferWidth = current_mode.Width;
-			pp.BackBufferHeight = current_mode.Height;
-			pp.BackBufferFormat = current_mode.Format;
-			pp.Windowed = FALSE;
-			pp.FullScreen_RefreshRateInHz = current_mode.RefreshRate;
-		}
-	}
-	if (config.get("APP", "ForceDefaultRefreshRate") && !pp.Windowed)
-	{
-		D3DDISPLAYMODE current_mode;
-		if (SUCCEEDED(d3d->GetAdapterDisplayMode(adapter_index, &current_mode)))
-		{
-			pp.FullScreen_RefreshRateInHz = current_mode.RefreshRate;
-		}
-	}
-
-	if (unsigned int force_resolution[2] = {};
-		config.get("APP", "ForceResolution", force_resolution) && force_resolution[0] != 0 && force_resolution[1] != 0)
-	{
-		pp.BackBufferWidth = force_resolution[0];
-		pp.BackBufferHeight = force_resolution[1];
-	}
-
-	if (config.get("APP", "Force10BitFormat"))
-	{
-		pp.BackBufferFormat = D3DFMT_A2R10G10B10;
-	}
 }
 void dump_and_modify_present_parameters(D3DPRESENT_PARAMETERS &pp, D3DDISPLAYMODEEX &fullscreen_desc, IDirect3D9 *d3d, UINT adapter_index, [[maybe_unused]] HWND focus_window)
 {
@@ -220,7 +200,7 @@ static void init_device_proxy(T *&device, D3DDEVTYPE device_type, bool use_softw
 	const auto device_proxy = new Direct3DDevice9(device, use_software_rendering);
 	device_proxy->_implicit_swapchain = new Direct3DSwapChain9(device_proxy, swapchain);
 
-	// Overwrite returned device with hooked one
+	// Overwrite returned device with proxy device
 	device = device_proxy;
 
 	// Check if this device was created via D3D9on12 and hook it too if so
@@ -247,7 +227,7 @@ HRESULT STDMETHODCALLTYPE IDirect3D9_CreateDevice(IDirect3D9 *pD3D, UINT Adapter
 {
 	// Pass on unmodified in case this called from within the runtime, to avoid hooking internal devices
 	if (g_in_d3d9_runtime)
-		return reshade::hooks::call(IDirect3D9_CreateDevice, vtable_from_instance(pD3D) + 16)(
+		return reshade::hooks::call(IDirect3D9_CreateDevice, reshade::hooks::vtable_from_instance(pD3D) + 16)(
 			pD3D, Adapter, DeviceType, hFocusWindow, BehaviorFlags, pPresentationParameters, ppReturnedDeviceInterface);
 
 	LOG(INFO) << "Redirecting " << "IDirect3D9::CreateDevice" << '('
@@ -287,7 +267,7 @@ HRESULT STDMETHODCALLTYPE IDirect3D9_CreateDevice(IDirect3D9 *pD3D, UINT Adapter
 
 	assert(!g_in_dxgi_runtime);
 	g_in_d3d9_runtime = g_in_dxgi_runtime = true;
-	const HRESULT hr = reshade::hooks::call(IDirect3D9_CreateDevice, vtable_from_instance(pD3D) + 16)(pD3D, Adapter, DeviceType, hFocusWindow, BehaviorFlags, &pp, ppReturnedDeviceInterface);
+	const HRESULT hr = reshade::hooks::call(IDirect3D9_CreateDevice, reshade::hooks::vtable_from_instance(pD3D) + 16)(pD3D, Adapter, DeviceType, hFocusWindow, BehaviorFlags, &pp, ppReturnedDeviceInterface);
 	g_in_d3d9_runtime = g_in_dxgi_runtime = false;
 
 	// Update output values (see https://docs.microsoft.com/windows/win32/api/d3d9/nf-d3d9-idirect3d9-createdevice)
@@ -316,7 +296,7 @@ HRESULT STDMETHODCALLTYPE IDirect3D9_CreateDevice(IDirect3D9 *pD3D, UINT Adapter
 HRESULT STDMETHODCALLTYPE IDirect3D9Ex_CreateDeviceEx(IDirect3D9Ex *pD3D, UINT Adapter, D3DDEVTYPE DeviceType, HWND hFocusWindow, DWORD BehaviorFlags, D3DPRESENT_PARAMETERS *pPresentationParameters, D3DDISPLAYMODEEX *pFullscreenDisplayMode, IDirect3DDevice9Ex **ppReturnedDeviceInterface)
 {
 	if (g_in_d3d9_runtime)
-		return reshade::hooks::call(IDirect3D9Ex_CreateDeviceEx, vtable_from_instance(pD3D) + 20)(
+		return reshade::hooks::call(IDirect3D9Ex_CreateDeviceEx, reshade::hooks::vtable_from_instance(pD3D) + 20)(
 			pD3D, Adapter, DeviceType, hFocusWindow, BehaviorFlags, pPresentationParameters, pFullscreenDisplayMode, ppReturnedDeviceInterface);
 
 	LOG(INFO) << "Redirecting " << "IDirect3D9Ex::CreateDeviceEx" << '('
@@ -360,7 +340,7 @@ HRESULT STDMETHODCALLTYPE IDirect3D9Ex_CreateDeviceEx(IDirect3D9Ex *pD3D, UINT A
 
 	assert(!g_in_dxgi_runtime);
 	g_in_d3d9_runtime = g_in_dxgi_runtime = true;
-	const HRESULT hr = reshade::hooks::call(IDirect3D9Ex_CreateDeviceEx, vtable_from_instance(pD3D) + 20)(pD3D, Adapter, DeviceType, hFocusWindow, BehaviorFlags, &pp, pp.Windowed ? nullptr : &fullscreen_mode, ppReturnedDeviceInterface);
+	const HRESULT hr = reshade::hooks::call(IDirect3D9Ex_CreateDeviceEx, reshade::hooks::vtable_from_instance(pD3D) + 20)(pD3D, Adapter, DeviceType, hFocusWindow, BehaviorFlags, &pp, pp.Windowed ? nullptr : &fullscreen_mode, ppReturnedDeviceInterface);
 	g_in_d3d9_runtime = g_in_dxgi_runtime = false;
 
 	// Update output values (see https://docs.microsoft.com/windows/win32/api/d3d9/nf-d3d9-idirect3d9ex-createdeviceex)
@@ -403,7 +383,7 @@ extern "C" IDirect3D9 *WINAPI Direct3DCreate9(UINT SDKVersion)
 		return nullptr;
 	}
 
-	reshade::hooks::install("IDirect3D9::CreateDevice", vtable_from_instance(res), 16, reinterpret_cast<reshade::hook::address>(&IDirect3D9_CreateDevice));
+	reshade::hooks::install("IDirect3D9::CreateDevice", reshade::hooks::vtable_from_instance(res), 16, reinterpret_cast<reshade::hook::address>(&IDirect3D9_CreateDevice));
 
 #if RESHADE_VERBOSE_LOG
 	LOG(DEBUG) << "Returning " << "IDirect3D9" << " object " << res << '.';
@@ -428,8 +408,8 @@ extern "C"     HRESULT WINAPI Direct3DCreate9Ex(UINT SDKVersion, IDirect3D9Ex **
 		return hr;
 	}
 
-	reshade::hooks::install("IDirect3D9::CreateDevice", vtable_from_instance(*ppD3D), 16, reinterpret_cast<reshade::hook::address>(&IDirect3D9_CreateDevice));
-	reshade::hooks::install("IDirect3D9Ex::CreateDeviceEx", vtable_from_instance(*ppD3D), 20, reinterpret_cast<reshade::hook::address>(&IDirect3D9Ex_CreateDeviceEx));
+	reshade::hooks::install("IDirect3D9::CreateDevice", reshade::hooks::vtable_from_instance(*ppD3D), 16, reinterpret_cast<reshade::hook::address>(&IDirect3D9_CreateDevice));
+	reshade::hooks::install("IDirect3D9Ex::CreateDeviceEx", reshade::hooks::vtable_from_instance(*ppD3D), 20, reinterpret_cast<reshade::hook::address>(&IDirect3D9Ex_CreateDeviceEx));
 
 #if RESHADE_VERBOSE_LOG
 	LOG(DEBUG) << "Returning " << "IDirect3D9Ex" << " object " << *ppD3D << '.';

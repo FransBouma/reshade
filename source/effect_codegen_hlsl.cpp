@@ -5,20 +5,28 @@
 
 #include "effect_parser.hpp"
 #include "effect_codegen.hpp"
-#include <cmath> // std::signbit, std::isinf, std::isnan
+#include <cmath> // std::isinf, std::isnan, std::signbit
 #include <cctype> // std::tolower
-#include <cstdio> // std::snprintf
 #include <cassert>
-#include <cstring> // stricmp
-#include <algorithm> // std::find_if, std::max
+#include <cstring> // stricmp, std::memcmp
+#include <charconv> // std::from_chars, std::to_chars
+#include <algorithm> // std::equal, std::find_if, std::max
 
 using namespace reshadefx;
+
+inline char to_digit(unsigned int value)
+{
+	assert(value < 10);
+	return '0' + static_cast<char>(value);
+}
 
 class codegen_hlsl final : public codegen
 {
 public:
-	codegen_hlsl(unsigned int shader_model, bool debug_info, bool uniforms_to_spec_constants)
-		: _shader_model(shader_model), _debug_info(debug_info), _uniforms_to_spec_constants(uniforms_to_spec_constants)
+	codegen_hlsl(unsigned int shader_model, bool debug_info, bool uniforms_to_spec_constants) :
+		_shader_model(shader_model),
+		_debug_info(debug_info),
+		_uniforms_to_spec_constants(uniforms_to_spec_constants)
 	{
 		// Create default block and reserve a memory block to avoid frequent reallocations
 		std::string &block = _blocks.emplace(0, std::string()).first->second;
@@ -43,19 +51,145 @@ private:
 	unsigned int _shader_model = 0;
 	bool _debug_info = false;
 	bool _uniforms_to_spec_constants = false;
+	std::string _remapped_semantics[15];
+	std::string _current_function_declaration;
+	std::vector<std::tuple<type, constant, id>> _constant_lookup;
 
 	// Only write compatibility intrinsics to result if they are actually in use
 	bool _uses_bitwise_cast = false;
+	bool _uses_bitwise_intrinsics = false;
 
-	void write_result(module &module) override
+	void write_result(effect_module &module) override
 	{
 		module = std::move(_module);
 
 		std::string preamble;
 
+#define IMPLEMENT_INTRINSIC_FALLBACK_ASINT(n) \
+		"int" #n " __asint(float" #n " v) {" \
+			"float" #n " e = 0;" \
+			"float" #n " f = frexp(v, e) * 2 - 1;" /* frexp does not include sign bit in HLSL, so can use as is */ \
+			"float" #n " m = ldexp(f, 23);" \
+			"return (v == 0) ? 0 : (v < 0 ? 2147483648 : 0) + (" /* Zero (does not handle negative zero) */ \
+			/*	isnan(v) ? 2147483647 : */ /* NaN */ \
+			/*	isinf(v) ? 2139095040 : */ /* Infinity */ \
+				"ldexp(e + 126, 23) + m);" \
+		"}"
+#define IMPLEMENT_INTRINSIC_FALLBACK_ASUINT(n) \
+		"int" #n " __asuint(float" #n " v) { return __asint(v); }"
+#define IMPLEMENT_INTRINSIC_FALLBACK_ASFLOAT(n) \
+		"float" #n " __asfloat(int" #n " v) {" \
+			"float" #n " m = v % exp2(23);" \
+			"float" #n " f = ldexp(m, -23);" \
+			"float" #n " e = floor(ldexp(v, -23) % 256);" \
+			"return (v > 2147483647 ? -1 : 1) * (" \
+			/*	e == 0 ? ldexp(f, -126) : */ /* Denormalized */ \
+			/*	e == 255 ? (m == 0 ? 1.#INF : -1.#IND) : */ /* Infinity and NaN */ \
+				"ldexp(1 + f, e - 127));" \
+		"}"
+
+		// See https://graphics.stanford.edu/%7Eseander/bithacks.html#CountBitsSetParallel
+#define IMPLEMENT_INTRINSIC_FALLBACK_COUNTBITS(n) \
+		"uint" #n " __countbits(uint" #n " v) {" \
+			"v = v - ((v >> 1) & 0x55555555);" \
+			"v = (v & 0x33333333) + ((v >> 2) & 0x33333333);" \
+			"v = (v + (v >> 4)) & 0x0F0F0F0F;" \
+			"v *= 0x01010101;" \
+			"return v >> 24;" \
+		"}"
+#define IMPLEMENT_INTRINSIC_FALLBACK_COUNTBITS_LOOP(n) \
+		"uint" #n " __countbits(uint" #n " v) {" \
+			"uint" #n " c = 0;" \
+			"while (any(v > 0)) {" \
+				"c += v % 2;" \
+				"v /= 2;" \
+			"}" \
+			"return c;" \
+		"}"
+
+		// See https://graphics.stanford.edu/%7Eseander/bithacks.html#ReverseParallel
+#define IMPLEMENT_INTRINSIC_FALLBACK_REVERSEBITS(n) \
+		"uint" #n " __reversebits(uint" #n " v) {" \
+			"v = ((v >> 1) & 0x55555555) | ((v & 0x55555555) << 1);" \
+			"v = ((v >> 2) & 0x33333333) | ((v & 0x33333333) << 2);" \
+			"v = ((v >> 4) & 0x0F0F0F0F) | ((v & 0x0F0F0F0F) << 4);" \
+			"v = ((v >> 8) & 0x00FF00FF) | ((v & 0x00FF00FF) << 8);" \
+			"return (v >> 16) | (v << 16);" \
+		"}"
+#define IMPLEMENT_INTRINSIC_FALLBACK_REVERSEBITS_LOOP(n) \
+		"uint" #n " __reversebits(uint" #n " v) {" \
+			"uint" #n " r = 0;" \
+			"for (int i = 0; i < 32; i++) {" \
+				"r *= 2;" \
+				"r += floor(x % 2);" \
+				"v /= 2;" \
+			"}" \
+			"return r;" \
+		"}"
+
+		// See https://graphics.stanford.edu/%7Eseander/bithacks.html#ZerosOnRightParallel
+#define IMPLEMENT_INTRINSIC_FALLBACK_FIRSTBITLOW(n) \
+		"uint" #n " __firstbitlow(uint" #n " v) {" \
+			"uint" #n " c = (v != 0) ? 31 : 32;" \
+			"v &= -int" #n "(v);" \
+			"c = (v & 0x0000FFFF) ? c - 16 : c;" \
+			"c = (v & 0x00FF00FF) ? c -  8 : c;" \
+			"c = (v & 0x0F0F0F0F) ? c -  4 : c;" \
+			"c = (v & 0x33333333) ? c -  2 : c;" \
+			"c = (v & 0x55555555) ? c -  1 : c;" \
+			"return c;" \
+		"}"
+#define IMPLEMENT_INTRINSIC_FALLBACK_FIRSTBITLOW_LOOP(n) \
+		"uint" #n " __firstbitlow(uint" #n " v) {" \
+			"uint" #n " c = (v != 0) ? 31 : 32;" \
+			"for (int i = 0; i < 32; i++) {" \
+				"c = c > i && (v % 2) != 0 ? i : c;" \
+				"v /= 2;" \
+			"}" \
+			"return c;" \
+		"}"
+
+
+#define IMPLEMENT_INTRINSIC_FALLBACK_FIRSTBITHIGH(n) \
+		"uint" #n " __firstbithigh(uint" #n " v) { return __firstbitlow(__reversebits(v)); }"
+
 		if (_shader_model >= 40)
 		{
-			preamble += "struct __sampler2D { Texture2D t; SamplerState s; };\n";
+			preamble +=
+				"struct __sampler1D_int { Texture1D<int> t; SamplerState s; };\n"
+				"struct __sampler2D_int { Texture2D<int> t; SamplerState s; };\n"
+				"struct __sampler3D_int { Texture3D<int> t; SamplerState s; };\n"
+				"struct __sampler1D_uint { Texture1D<uint> t; SamplerState s; };\n"
+				"struct __sampler2D_uint { Texture2D<uint> t; SamplerState s; };\n"
+				"struct __sampler3D_uint { Texture3D<uint> t; SamplerState s; };\n"
+				"struct __sampler1D_float { Texture1D<float> t; SamplerState s; };\n"
+				"struct __sampler2D_float { Texture2D<float> t; SamplerState s; };\n"
+				"struct __sampler3D_float { Texture3D<float> t; SamplerState s; };\n"
+				"struct __sampler1D_float4 { Texture1D<float4> t; SamplerState s; };\n"
+				"struct __sampler2D_float4 { Texture2D<float4> t; SamplerState s; };\n"
+				"struct __sampler3D_float4 { Texture3D<float4> t; SamplerState s; };\n";
+
+			if (_uses_bitwise_intrinsics && _shader_model < 50)
+				preamble +=
+					IMPLEMENT_INTRINSIC_FALLBACK_COUNTBITS(1) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_COUNTBITS(2) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_COUNTBITS(3) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_COUNTBITS(4) "\n"
+
+					IMPLEMENT_INTRINSIC_FALLBACK_REVERSEBITS(1) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_REVERSEBITS(2) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_REVERSEBITS(3) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_REVERSEBITS(4) "\n"
+
+					IMPLEMENT_INTRINSIC_FALLBACK_FIRSTBITLOW(1) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_FIRSTBITLOW(2) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_FIRSTBITLOW(3) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_FIRSTBITLOW(4) "\n"
+
+					IMPLEMENT_INTRINSIC_FALLBACK_FIRSTBITHIGH(1) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_FIRSTBITHIGH(2) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_FIRSTBITHIGH(3) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_FIRSTBITHIGH(4) "\n";
 
 			if (!_cbuffer_block.empty())
 			{
@@ -67,44 +201,55 @@ private:
 		}
 		else
 		{
-			preamble += "struct __sampler2D { sampler2D s; float2 pixelsize; };\n";
-			preamble += "uniform float2 __TEXEL_SIZE__ : register(c255);\n";
+			preamble +=
+				"struct __sampler1D { sampler1D s; float1 pixelsize; };\n"
+				"struct __sampler2D { sampler2D s; float2 pixelsize; };\n"
+				"struct __sampler3D { sampler3D s; float3 pixelsize; };\n"
+				"uniform float2 __TEXEL_SIZE__ : register(c255);\n";
 
 			if (_uses_bitwise_cast)
 				preamble +=
-					"int __asint(float v) {"
-					"	if (v == 0) return 0;" // Zero (does not handle negative zero)
-					//	if (isinf(v)) return v < 0 ? 4286578688 : 2139095040; // Infinity
-					//	if (isnan(v)) return 2147483647; // NaN (does not handle negative NaN)
-					"	float e = 0;"
-					"	float f = frexp(v, e) * 2 - 1;" // frexp does not include sign bit in HLSL, so can use as is
-					"	float m = ldexp(f, 23);"
-					"	return (v < 0 ? 2147483648 : 0) + ldexp(e + 126, 23) + m;"
-					"}\n"
-					"int2 __asint(float2 v) { return int2(__asint(v.x), __asint(v.y)); }\n"
-					"int3 __asint(float3 v) { return int3(__asint(v.x), __asint(v.y), __asint(v.z)); }\n"
-					"int4 __asint(float4 v) { return int4(__asint(v.x), __asint(v.y), __asint(v.z), __asint(v.w)); }\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_ASINT(1) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_ASINT(2) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_ASINT(3) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_ASINT(4) "\n"
 
-					"int __asuint(float v) { return __asint(v); }\n"
-					"int2 __asuint(float2 v) { return int2(__asint(v.x), __asint(v.y)); }\n"
-					"int3 __asuint(float3 v) { return int3(__asint(v.x), __asint(v.y), __asint(v.z)); }\n"
-					"int4 __asuint(float4 v) { return int4(__asint(v.x), __asint(v.y), __asint(v.z), __asint(v.w)); }\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_ASUINT(1) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_ASUINT(2) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_ASUINT(3) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_ASUINT(4) "\n"
 
-					"float __asfloat(int v) {"
-					"	float m = v % exp2(23);"
-					"	float f = ldexp(m, -23);"
-					"	float e = floor(ldexp(v, -23) % 256);"
-					"	return (v > 2147483647 ? -1 : 1) * ("
-					//		e == 0 ? ldexp(f, -126) : // Denormalized
-					//		e == 255 ? (m == 0 ? 1.#INF : -1.#IND) : // Infinity and NaN
-					"		ldexp(1 + f, e - 127));"
-					"}\n"
-					"float2 __asfloat(int2 v) { return float2(__asfloat(v.x), __asfloat(v.y)); }\n"
-					"float3 __asfloat(int3 v) { return float3(__asfloat(v.x), __asfloat(v.y), __asfloat(v.z)); }\n"
-					"float4 __asfloat(int4 v) { return float4(__asfloat(v.x), __asfloat(v.y), __asfloat(v.z), __asfloat(v.w)); }\n";
+					IMPLEMENT_INTRINSIC_FALLBACK_ASFLOAT(1) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_ASFLOAT(2) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_ASFLOAT(3) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_ASFLOAT(4) "\n";
+
+			if (_uses_bitwise_intrinsics)
+				preamble +=
+					IMPLEMENT_INTRINSIC_FALLBACK_COUNTBITS_LOOP(1) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_COUNTBITS_LOOP(2) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_COUNTBITS_LOOP(3) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_COUNTBITS_LOOP(4) "\n"
+
+					IMPLEMENT_INTRINSIC_FALLBACK_REVERSEBITS_LOOP(1) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_REVERSEBITS_LOOP(2) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_REVERSEBITS_LOOP(3) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_REVERSEBITS_LOOP(4) "\n"
+
+					IMPLEMENT_INTRINSIC_FALLBACK_FIRSTBITLOW_LOOP(1) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_FIRSTBITLOW_LOOP(2) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_FIRSTBITLOW_LOOP(3) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_FIRSTBITLOW_LOOP(4) "\n"
+
+					IMPLEMENT_INTRINSIC_FALLBACK_FIRSTBITHIGH(1) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_FIRSTBITHIGH(2) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_FIRSTBITHIGH(3) "\n"
+					IMPLEMENT_INTRINSIC_FALLBACK_FIRSTBITHIGH(4) "\n";
 
 			if (!_cbuffer_block.empty())
+			{
 				preamble += _cbuffer_block;
+			}
 
 			// Offsets were multiplied in 'define_uniform', so adjust total size here accordingly
 			module.total_uniform_size *= 4;
@@ -152,7 +297,7 @@ private:
 		{
 		case type::t_void:
 			s += "void";
-			break;
+			return;
 		case type::t_bool:
 			s += "bool";
 			break;
@@ -179,36 +324,105 @@ private:
 			break;
 		case type::t_struct:
 			s += id_to_name(type.definition);
-			break;
-		case type::t_sampler:
-			s += "__sampler2D";
-			break;
-		case type::t_storage:
-			s += "RWTexture2D<float4>";
-			break;
+			return;
+		case type::t_sampler1d_int:
+		case type::t_sampler2d_int:
+		case type::t_sampler3d_int:
+			s += "__sampler";
+			s += to_digit(type.texture_dimension());
+			s += 'D';
+			if (_shader_model >= 40)
+			{
+				s += "_int";
+				if (type.rows > 1)
+					s += to_digit(type.rows);
+			}
+			return;
+		case type::t_sampler1d_uint:
+		case type::t_sampler2d_uint:
+		case type::t_sampler3d_uint:
+			s += "__sampler";
+			s += to_digit(type.texture_dimension());
+			s += 'D';
+			if (_shader_model >= 40)
+			{
+				s += "_uint";
+				if (type.rows > 1)
+					s += to_digit(type.rows);
+			}
+			return;
+		case type::t_sampler1d_float:
+		case type::t_sampler2d_float:
+		case type::t_sampler3d_float:
+			s += "__sampler";
+			s += to_digit(type.texture_dimension());
+			s += 'D';
+			if (_shader_model >= 40)
+			{
+				s += "_float";
+				if (type.rows > 1)
+					s += to_digit(type.rows);
+			}
+			return;
+		case type::t_storage1d_int:
+		case type::t_storage2d_int:
+		case type::t_storage3d_int:
+			s += "RWTexture";
+			s += to_digit(type.texture_dimension());
+			s += "D<";
+			s += "int";
+			if (type.rows > 1)
+				s += to_digit(type.rows);
+			s += '>';
+			return;
+		case type::t_storage1d_uint:
+		case type::t_storage2d_uint:
+		case type::t_storage3d_uint:
+			s += "RWTexture";
+			s += to_digit(type.texture_dimension());
+			s += "D<";
+			s += "uint";
+			if (type.rows > 1)
+				s += to_digit(type.rows);
+			s += '>';
+			return;
+		case type::t_storage1d_float:
+		case type::t_storage2d_float:
+		case type::t_storage3d_float:
+			s += "RWTexture";
+			s += to_digit(type.texture_dimension());
+			s += "D<";
+			s += "float";
+			if (type.rows > 1)
+				s += to_digit(type.rows);
+			s += '>';
+			return;
 		default:
 			assert(false);
+			return;
 		}
 
 		if (type.rows > 1)
-			s += std::to_string(type.rows);
+			s += to_digit(type.rows);
 		if (type.cols > 1)
-			s += 'x' + std::to_string(type.cols);
+			s += 'x', s += to_digit(type.cols);
 	}
-	void write_constant(std::string &s, const type &type, const constant &data) const
+	void write_constant(std::string &s, const type &data_type, const constant &data) const
 	{
-		if (type.is_array())
+		if (data_type.is_array())
 		{
-			auto elem_type = type;
+			assert(data_type.is_bounded_array());
+
+			type elem_type = data_type;
 			elem_type.array_length = 0;
 
 			s += "{ ";
 
-			for (int i = 0; i < type.array_length; ++i)
+			for (unsigned int a = 0; a < data_type.array_length; ++a)
 			{
-				write_constant(s, elem_type, i < static_cast<int>(data.array_data.size()) ? data.array_data[i] : constant());
+				write_constant(s, elem_type, a < static_cast<unsigned int>(data.array_data.size()) ? data.array_data[a] : constant {});
 
-				if (i < type.array_length - 1)
+				if (a < data_type.array_length - 1)
 					s += ", ";
 			}
 
@@ -216,24 +430,24 @@ private:
 			return;
 		}
 
-		if (type.is_struct())
+		if (data_type.is_struct())
 		{
 			// The can only be zero initializer struct constants
 			assert(data.as_uint[0] == 0);
 
-			s += '(' + id_to_name(type.definition) + ")0";
+			s += '(' + id_to_name(data_type.definition) + ")0";
 			return;
 		}
 
 		// There can only be numeric constants
-		assert(type.is_numeric());
+		assert(data_type.is_numeric());
 
-		if (!type.is_scalar())
-			write_type<false, false>(s, type), s += '(';
+		if (!data_type.is_scalar())
+			write_type<false, false>(s, data_type), s += '(';
 
-		for (unsigned int i = 0, components = type.components(); i < components; ++i)
+		for (unsigned int i = 0, components = data_type.components(); i < components; ++i)
 		{
-			switch (type.base)
+			switch (data_type.base)
 			{
 			case type::t_bool:
 				s += data.as_uint[i] ? "true" : "false";
@@ -256,9 +470,12 @@ private:
 					s += std::signbit(data.as_float[i]) ? "1.#INF" : "-1.#INF";
 					break;
 				}
-				char temp[64]; // Will be null-terminated by snprintf
-				std::snprintf(temp, sizeof(temp), "%1.8e", data.as_float[i]);
-				s += temp;
+				char temp[64];
+				const std::to_chars_result res = std::to_chars(temp, temp + sizeof(temp), data.as_float[i], std::chars_format::scientific, 8);
+				if (res.ec == std::errc())
+					s.append(temp, res.ptr);
+				else
+					assert(false);
 				break;
 			default:
 				assert(false);
@@ -268,7 +485,7 @@ private:
 				s += ", ";
 		}
 
-		if (!type.is_scalar())
+		if (!data_type.is_scalar())
 			s += ')';
 	}
 	template <bool force_source = false>
@@ -302,6 +519,37 @@ private:
 
 		s += '\n';
 	}
+	void write_texture_format(std::string &s, texture_format format)
+	{
+		switch (format)
+		{
+		case texture_format::r32i:
+			s += "int";
+			break;
+		case texture_format::r32u:
+			s += "uint";
+			break;
+		default:
+			assert(false);
+			[[fallthrough]];
+		case texture_format::unknown:
+		case texture_format::r8:
+		case texture_format::r16:
+		case texture_format::r16f:
+		case texture_format::r32f:
+		case texture_format::rg8:
+		case texture_format::rg16:
+		case texture_format::rg16f:
+		case texture_format::rg32f:
+		case texture_format::rgba8:
+		case texture_format::rgba16:
+		case texture_format::rgba16f:
+		case texture_format::rgba32f:
+		case texture_format::rgb10a2:
+			s += "float4";
+			break;
+		}
+	}
 
 	std::string id_to_name(id id) const
 	{
@@ -321,17 +569,20 @@ private:
 				return; // Filter out names that may clash with automatic ones
 		name = escape_name(std::move(name));
 		if constexpr (naming_type == naming::general)
-			if (std::find_if(_names.begin(), _names.end(), [&name](const auto &it) { return it.second == name; }) != _names.end())
+			if (std::find_if(_names.begin(), _names.end(),
+					[&name](const auto &names_it) { return names_it.second == name; }) != _names.end())
 				name += '_' + std::to_string(id); // Append a numbered suffix if the name already exists
 		_names[id] = std::move(name);
 	}
 
-	std::string convert_semantic(const std::string &semantic) const
+	std::string convert_semantic(const std::string &semantic, uint32_t max_attributes = 1)
 	{
 		if (_shader_model < 40)
 		{
 			if (semantic == "SV_POSITION")
 				return "POSITION"; // For pixel shaders this has to be "VPOS", so need to redefine that in post
+			if (semantic == "VPOS")
+				return "VPOS";
 			if (semantic == "SV_POINTSIZE")
 				return "PSIZE";
 			if (semantic.compare(0, 9, "SV_TARGET") == 0)
@@ -342,6 +593,44 @@ private:
 				return "TEXCOORD0 /* VERTEXID */";
 			if (semantic == "SV_ISFRONTFACE")
 				return "VFACE";
+
+			size_t digit_index = semantic.size() - 1;
+			while (digit_index != 0 && semantic[digit_index] >= '0' && semantic[digit_index] <= '9')
+				digit_index--;
+			digit_index++;
+
+			const std::string semantic_base = semantic.substr(0, digit_index);
+
+			uint32_t semantic_digit = 0;
+			std::from_chars(semantic.c_str() + digit_index, semantic.c_str() + semantic.size(), semantic_digit);
+
+			if (semantic_base == "TEXCOORD")
+			{
+				if (semantic_digit < 15)
+				{
+					assert(_remapped_semantics[semantic_digit].empty() || _remapped_semantics[semantic_digit] == semantic); // Mixing custom semantic names and multiple TEXCOORD indices is not supported
+					_remapped_semantics[semantic_digit] = semantic;
+				}
+			}
+			// Shader model 3 only supports a selected list of semantic names, so need to remap custom ones to that
+			else if (
+				semantic_base != "COLOR" &&
+				semantic_base != "NORMAL" &&
+				semantic_base != "TANGENT" &&
+				semantic_base != "BINORMAL")
+			{
+				// Legal semantic indices are between 0 and 15, but skip first entry in case both custom semantic names and the common TEXCOORD0 exist
+				for (int i = 1; i < 15; ++i)
+				{
+					if (_remapped_semantics[i].empty() || _remapped_semantics[i] == semantic)
+					{
+						for (uint32_t a = 0; a < max_attributes && i + a < 15; ++a)
+							_remapped_semantics[i + a] = semantic_base + std::to_string(semantic_digit + a);
+
+						return "TEXCOORD" + std::to_string(i) + " /* " + semantic + " */";
+					}
+				}
+			}
 		}
 		else
 		{
@@ -396,15 +685,18 @@ private:
 
 		code += "struct " + id_to_name(info.definition) + "\n{\n";
 
-		for (const auto &member : info.member_list)
+		for (const struct_member_info &member : info.member_list)
 		{
 			code += '\t';
 			write_type<true>(code, member.type); // HLSL allows interpolation attributes on struct members, so handle this like a parameter
 			code += ' ' + member.name;
+
 			if (member.type.is_array())
 				code += '[' + std::to_string(member.type.array_length) + ']';
+
 			if (!member.semantic.empty())
-				code += " : " + convert_semantic(member.semantic);
+				code += " : " + convert_semantic(member.semantic, std::max(1u, member.type.components() / 4) * std::max(1u, member.type.array_length));
+
 			code += ";\n";
 		}
 
@@ -431,43 +723,51 @@ private:
 			if (_shader_model >= 60)
 				code += "[[vk::binding(" + std::to_string(info.binding + 0) + ", 2)]] "; // Descriptor set 2
 
-			code += "Texture2D __"     + info.unique_name + " : register(t" + std::to_string(info.binding + 0) + ");\n";
+			code += "Texture";
+			code += to_digit(static_cast<unsigned int>(info.type));
+			code += "D<";
+			write_texture_format(code, info.format);
+			code += "> __"     + info.unique_name + " : register(t" + std::to_string(info.binding + 0) + "); \n";
 
 			if (_shader_model >= 60)
 				code += "[[vk::binding(" + std::to_string(info.binding + 1) + ", 2)]] "; // Descriptor set 2
 
-			code += "Texture2D __srgb" + info.unique_name + " : register(t" + std::to_string(info.binding + 1) + ");\n";
+			code += "Texture";
+			code += to_digit(static_cast<unsigned int>(info.type));
+			code += "D<";
+			write_texture_format(code, info.format);
+			code += "> __srgb" + info.unique_name + " : register(t" + std::to_string(info.binding + 1) + "); \n";
 		}
 
 		_module.textures.push_back(info);
 
 		return info.id;
 	}
-	id   define_sampler(const location &loc, sampler_info &info) override
+	id   define_sampler(const location &loc, const texture_info &tex_info, sampler_info &info) override
 	{
 		info.id = make_id();
 
 		define_name<naming::unique>(info.id, info.unique_name);
-
-		const auto texture = std::find_if(_module.textures.begin(), _module.textures.end(),
-			[&info](const auto &it) {
-				return it.unique_name == info.texture_name;
-			});
-		assert(texture != _module.textures.end());
 
 		std::string &code = _blocks.at(_current_block);
 
 		if (_shader_model >= 40)
 		{
 			// Try and reuse a sampler binding with the same sampler description
-			const auto existing_sampler = std::find_if(_module.samplers.begin(), _module.samplers.end(),
-				[&info](const auto &it) {
-					return it.filter == info.filter && it.address_u == info.address_u && it.address_v == info.address_v && it.address_w == info.address_w && it.min_lod == info.min_lod && it.max_lod == info.max_lod && it.lod_bias == info.lod_bias;
+			const auto existing_sampler_it = std::find_if(_module.samplers.begin(), _module.samplers.end(),
+				[&info](const sampler_info &existing_info) {
+					return
+						existing_info.filter == info.filter &&
+						existing_info.address_u == info.address_u &&
+						existing_info.address_v == info.address_v &&
+						existing_info.address_w == info.address_w &&
+						existing_info.min_lod == info.min_lod &&
+						existing_info.max_lod == info.max_lod &&
+						existing_info.lod_bias == info.lod_bias;
 				});
-
-			if (existing_sampler != _module.samplers.end())
+			if (existing_sampler_it != _module.samplers.end())
 			{
-				info.binding = existing_sampler->binding;
+				info.binding = existing_sampler_it->binding;
 			}
 			else
 			{
@@ -479,28 +779,44 @@ private:
 				code += "SamplerState __s" + std::to_string(info.binding) + " : register(s" + std::to_string(info.binding) + ");\n";
 			}
 
-			assert(info.srgb == 0 || info.srgb == 1);
-			info.texture_binding = texture->binding + info.srgb; // Offset binding by one to choose the SRGB variant
+			info.texture_binding = tex_info.binding + (info.srgb ? 1 : 0); // Offset binding by one to choose the SRGB variant
 
 			write_location(code, loc);
 
-			code += "static const __sampler2D " + id_to_name(info.id) + " = { " + (info.srgb ? "__srgb" : "__") + info.texture_name + ", __s" + std::to_string(info.binding) + " };\n";
+			code += "static const ";
+			write_type(code, info.type);
+			code += ' ' + id_to_name(info.id) + " = { " + (info.srgb ? "__srgb" : "__") + info.texture_name + ", __s" + std::to_string(info.binding) + " };\n";
 		}
 		else
 		{
 			info.binding = _module.num_sampler_bindings++;
 			info.texture_binding = ~0u; // Unset texture binding
 
-			code += "sampler2D __" + info.unique_name + "_s : register(s" + std::to_string(info.binding) + ");\n";
+			const unsigned int texture_dimension = info.type.texture_dimension();
+
+			code += "sampler";
+			code += to_digit(texture_dimension);
+			code += "D __" + info.unique_name + "_s : register(s" + std::to_string(info.binding) + ");\n";
 
 			write_location(code, loc);
 
-			code += "static const __sampler2D " + id_to_name(info.id) + " = { __" + info.unique_name + "_s, float2(";
+			code += "static const ";
+			write_type(code, info.type);
+			code += ' ' + id_to_name(info.id) + " = { __" + info.unique_name + "_s, float" + to_digit(texture_dimension) + '(';
 
-			if (texture->semantic.empty())
-				code += "1.0 / " + std::to_string(texture->width) + ", 1.0 / " + std::to_string(texture->height);
+			if (tex_info.semantic.empty())
+			{
+					code +=   "1.0 / " + std::to_string(tex_info.width);
+				if (texture_dimension >= 2)
+					code += ", 1.0 / " + std::to_string(tex_info.height);
+				if (texture_dimension >= 3)
+					code += ", 1.0 / " + std::to_string(tex_info.depth);
+			}
 			else
-				code += texture->semantic + "_PIXEL_SIZE"; // Expect application to set inverse texture size via a define if it is not known here
+			{
+				// Expect application to set inverse texture size via a define if it is not known here
+				code += tex_info.semantic + "_PIXEL_SIZE";
+			}
 
 			code += ") }; \n";
 		}
@@ -509,7 +825,7 @@ private:
 
 		return info.id;
 	}
-	id   define_storage(const location &loc, storage_info &info) override
+	id   define_storage(const location &loc, const texture_info &, storage_info &info) override
 	{
 		info.id = make_id();
 		info.binding = ~0u;
@@ -527,34 +843,8 @@ private:
 			if (_shader_model >= 60)
 				code += "[[vk::binding(" + std::to_string(info.binding) + ", 3)]] "; // Descriptor set 3
 
-			code += "RWTexture2D<";
-
-			switch (info.format)
-			{
-			case texture_format::r8:
-			case texture_format::r16:
-			case texture_format::r16f:
-			case texture_format::r32f:
-				code += "float";
-				break;
-			default:
-				assert(false);
-				[[fallthrough]];
-			case texture_format::unknown:
-			case texture_format::rg8:
-			case texture_format::rg16:
-			case texture_format::rg16f:
-			case texture_format::rg32f:
-			case texture_format::rgba8:
-			case texture_format::rgba16:
-			case texture_format::rgba16f:
-			case texture_format::rgba32f:
-			case texture_format::rgb10a2:
-				code += "float4";
-				break;
-			}
-
-			code += "> " + info.unique_name + " : register(u" + std::to_string(info.binding) + ");\n";
+			write_type(code, info.type);
+			code += ' ' + info.unique_name + " : register(u" + std::to_string(info.binding) + ");\n";
 		}
 
 		_module.storages.push_back(info);
@@ -647,6 +937,14 @@ private:
 	}
 	id   define_variable(const location &loc, const type &type, std::string name, bool global, id initializer_value) override
 	{
+		// Constant variables with a constant initializer can just point to the initializer SSA variable, since they cannot be modified anyway, thus saving an unnecessary assignment
+		if (initializer_value != 0 && type.has(type::q_const) &&
+			std::find_if(_constant_lookup.begin(), _constant_lookup.end(),
+				[initializer_value](const auto &x) {
+					return initializer_value == std::get<2>(x);
+				}) != _constant_lookup.end())
+			return initializer_value;
+
 		const id res = make_id();
 
 		if (!name.empty())
@@ -658,9 +956,6 @@ private:
 
 		if (!global)
 			code += '\t';
-
-		if (initializer_value != 0 && type.has(type::q_const))
-			code += "const ";
 
 		write_type(code, type);
 		code += ' ' + id_to_name(res);
@@ -681,7 +976,8 @@ private:
 
 		define_name<naming::unique>(info.definition, info.unique_name);
 
-		std::string &code = _blocks.at(_current_block);
+		assert(_current_block == 0 && _current_function_declaration.empty());
+		std::string &code = _current_function_declaration;
 
 		write_location(code, loc);
 
@@ -690,7 +986,7 @@ private:
 
 		for (size_t i = 0, num_params = info.parameter_list.size(); i < num_params; ++i)
 		{
-			auto &param = info.parameter_list[i];
+			struct_member_info &param = info.parameter_list[i];
 
 			param.definition = make_id();
 			define_name<naming::unique>(param.definition, param.name);
@@ -705,7 +1001,7 @@ private:
 				code += '[' + std::to_string(param.type.array_length) + ']';
 
 			if (!param.semantic.empty())
-				code += " : " + convert_semantic(param.semantic);
+				code += " : " + convert_semantic(param.semantic, std::max(1u, param.type.cols / 4) * std::max(1u, param.type.array_length));
 
 			if (i < num_params - 1)
 				code += ',';
@@ -723,44 +1019,45 @@ private:
 		return info.definition;
 	}
 
-	void define_entry_point(function_info &func, shader_type stype, int num_threads[3]) override
+	void define_entry_point(function_info &func) override
 	{
 		// Modify entry point name since a new function is created for it below
-		if (stype == shader_type::cs)
+		if (func.type == shader_type::compute)
 			func.unique_name = 'E' + func.unique_name +
-				'_' + std::to_string(num_threads[0]) +
-				'_' + std::to_string(num_threads[1]) +
-				'_' + std::to_string(num_threads[2]);
+				'_' + std::to_string(func.num_threads[0]) +
+				'_' + std::to_string(func.num_threads[1]) +
+				'_' + std::to_string(func.num_threads[2]);
 		else if (_shader_model < 40)
 			func.unique_name = 'E' + func.unique_name;
 
-		if (const auto it = std::find_if(_module.entry_points.begin(), _module.entry_points.end(),
-				[&func](const auto &ep) { return ep.name == func.unique_name; });
-			it != _module.entry_points.end())
+		if (std::find_if(_module.entry_points.begin(), _module.entry_points.end(),
+				[&func](const std::pair<std::string, shader_type> &entry_point) {
+					return entry_point.first == func.unique_name;
+				}) != _module.entry_points.end())
 			return;
 
-		_module.entry_points.push_back({ func.unique_name, stype });
+		_module.entry_points.emplace_back(func.unique_name, func.type);
 
 		// Only have to rewrite the entry point function signature in shader model 3 and for compute (to write "numthreads" attribute)
-		if (_shader_model >= 40 && stype != shader_type::cs)
+		if (_shader_model >= 40 && func.type != shader_type::compute)
 			return;
 
-		auto entry_point = func;
+		function_info entry_point = func;
 
 		const auto is_color_semantic = [](const std::string &semantic) {
 			return semantic.compare(0, 9, "SV_TARGET") == 0 || semantic.compare(0, 5, "COLOR") == 0; };
 		const auto is_position_semantic = [](const std::string &semantic) {
 			return semantic == "SV_POSITION" || semantic == "POSITION"; };
 
-		const auto ret = make_id();
+		const id ret = make_id();
 		define_name<naming::general>(ret, "ret");
 
 		std::string position_variable_name;
 		{
-			if (func.return_type.is_struct() && stype == shader_type::vs)
+			if (func.return_type.is_struct() && func.type == shader_type::vertex)
 			{
 				// If this function returns a struct which contains a position output, keep track of its member name
-				for (const struct_member_info &member : find_struct(func.return_type.definition).member_list)
+				for (const struct_member_info &member : get_struct(func.return_type.definition).member_list)
 					if (is_position_semantic(member.semantic))
 						position_variable_name = id_to_name(ret) + '.' + member.name;
 			}
@@ -772,18 +1069,18 @@ private:
 			}
 			if (is_position_semantic(func.return_semantic))
 			{
-				if (stype == shader_type::vs)
+				if (func.type == shader_type::vertex)
 					// Keep track of the position output variable
 					position_variable_name = id_to_name(ret);
 			}
 		}
 		for (struct_member_info &param : entry_point.parameter_list)
 		{
-			if (param.type.is_struct() && stype == shader_type::vs)
+			if (param.type.is_struct() && func.type == shader_type::vertex)
 			{
-				for (const struct_member_info &member : find_struct(param.type.definition).member_list)
+				for (const struct_member_info &member : get_struct(param.type.definition).member_list)
 					if (is_position_semantic(member.semantic))
-						position_variable_name = param.name + '.' + member.name;
+						position_variable_name = id_to_name(param.definition) + '.' + member.name;
 			}
 
 			if (is_color_semantic(param.semantic))
@@ -792,20 +1089,20 @@ private:
 			}
 			if (is_position_semantic(param.semantic))
 			{
-				if (stype == shader_type::vs)
+				if (func.type == shader_type::vertex)
 					// Keep track of the position output variable
-					position_variable_name = param.name;
-				else if (stype == shader_type::ps)
+					position_variable_name = id_to_name(param.definition);
+				else if (func.type == shader_type::pixel)
 					// Change the position input semantic in pixel shaders
 					param.semantic = "VPOS";
 			}
 		}
 
-		if (stype == shader_type::cs)
+		if (func.type == shader_type::compute)
 			_blocks.at(_current_block) += "[numthreads(" +
-				std::to_string(num_threads[0]) + ", " +
-				std::to_string(num_threads[1]) + ", " +
-				std::to_string(num_threads[2]) + ")]\n";
+				std::to_string(func.num_threads[0]) + ", " +
+				std::to_string(func.num_threads[1]) + ", " +
+				std::to_string(func.num_threads[2]) + ")]\n";
 
 		define_function({}, entry_point);
 		enter_block(create_block());
@@ -816,7 +1113,7 @@ private:
 		for (struct_member_info &param : entry_point.parameter_list)
 		{
 			if (is_color_semantic(param.semantic))
-				code += '\t' + param.name + " = float4(0.0, 0.0, 0.0, 0.0);\n";
+				code += '\t' + id_to_name(param.definition) + " = float4(0.0, 0.0, 0.0, 0.0);\n";
 		}
 
 		code += '\t';
@@ -835,13 +1132,13 @@ private:
 
 		for (size_t i = 0, num_params = func.parameter_list.size(); i < num_params; ++i)
 		{
-			code += func.parameter_list[i].name;
+			code += id_to_name(entry_point.parameter_list[i].definition);
 
 			if (is_color_semantic(func.parameter_list[i].semantic))
 			{
 				code += '.';
-				for (unsigned int k = 0; k < func.parameter_list[i].type.rows; k++)
-					code += "xyzw"[k];
+				for (unsigned int c = 0; c < func.parameter_list[i].type.rows; c++)
+					code += "xyzw"[c];
 			}
 
 			if (i < num_params - 1)
@@ -853,7 +1150,7 @@ private:
 		// Cast the output value to a four-component vector
 		if (is_color_semantic(func.return_semantic))
 		{
-			for (unsigned int i = 0; i < 4 - func.return_type.rows; i++)
+			for (unsigned int c = 0; c < (4 - func.return_type.rows); c++)
 				code += ", 0.0";
 			code += ')';
 		}
@@ -861,7 +1158,7 @@ private:
 		code += ";\n";
 
 		// Shift everything by half a viewport pixel to workaround the different half-pixel offset in D3D9 (https://aras-p.info/blog/2016/04/08/solving-dx9-half-pixel-offset/)
-		if (!position_variable_name.empty() && stype == shader_type::vs) // Check if we are in a vertex shader definition
+		if (!position_variable_name.empty() && func.type == shader_type::vertex) // Check if we are in a vertex shader definition
 			code += '\t' + position_variable_name + ".xy += __TEXEL_SIZE__ * " + position_variable_name + ".ww;\n";
 
 		leave_block_and_return(func.return_type.is_void() ? 0 : ret);
@@ -886,7 +1183,7 @@ private:
 
 		std::string type, expr_code = id_to_name(exp.base);
 
-		for (const auto &op : exp.chain)
+		for (const expression::operation &op : exp.chain)
 		{
 			switch (op.op)
 			{
@@ -898,7 +1195,7 @@ private:
 				break;
 			case expression::operation::op_member:
 				expr_code += '.';
-				expr_code += find_struct(op.from.definition).member_list[op.index].name;
+				expr_code += get_struct(op.from.definition).member_list[op.index].name;
 				break;
 			case expression::operation::op_dynamic_index:
 				expr_code += '[' + id_to_name(op.index) + ']';
@@ -912,7 +1209,7 @@ private:
 				break;
 			case expression::operation::op_swizzle:
 				expr_code += '.';
-				for (unsigned int i = 0; i < 4 && op.swizzle[i] >= 0; ++i)
+				for (int i = 0; i < 4 && op.swizzle[i] >= 0; ++i)
 					if (op.from.is_matrix())
 						expr_code += s_matrix_swizzles[op.swizzle[i]];
 					else
@@ -953,13 +1250,13 @@ private:
 			"_m30", "_m31", "_m32", "_m33"
 		};
 
-		for (const auto &op : exp.chain)
+		for (const expression::operation &op : exp.chain)
 		{
 			switch (op.op)
 			{
 			case expression::operation::op_member:
 				code += '.';
-				code += find_struct(op.from.definition).member_list[op.index].name;
+				code += get_struct(op.from.definition).member_list[op.index].name;
 				break;
 			case expression::operation::op_dynamic_index:
 				code += '[' + id_to_name(op.index) + ']';
@@ -969,7 +1266,7 @@ private:
 				break;
 			case expression::operation::op_swizzle:
 				code += '.';
-				for (unsigned int i = 0; i < 4 && op.swizzle[i] >= 0; ++i)
+				for (int i = 0; i < 4 && op.swizzle[i] >= 0; ++i)
 					if (op.from.is_matrix())
 						code += s_matrix_swizzles[op.swizzle[i]];
 					else
@@ -981,30 +1278,44 @@ private:
 		code += " = " + id_to_name(value) + ";\n";
 	}
 
-	id   emit_constant(const type &type, const constant &data) override
+	id   emit_constant(const type &data_type, const constant &data) override
 	{
 		const id res = make_id();
 
-		if (type.is_array())
+		if (data_type.is_array())
 		{
-			assert(type.has(type::q_const));
+			assert(data_type.has(type::q_const));
 
-			std::string &code = _blocks.at(_current_block);
+			if (const auto it = std::find_if(_constant_lookup.begin(), _constant_lookup.end(),
+					[&data_type, &data](const std::tuple<type, constant, id> &x) {
+						if (!(std::get<0>(x) == data_type && std::memcmp(&std::get<1>(x).as_uint[0], &data.as_uint[0], sizeof(uint32_t) * 16) == 0 && std::get<1>(x).array_data.size() == data.array_data.size()))
+							return false;
+						for (size_t i = 0; i < data.array_data.size(); ++i)
+							if (std::memcmp(&std::get<1>(x).array_data[i].as_uint[0], &data.array_data[i].as_uint[0], sizeof(uint32_t) * 16) != 0)
+								return false;
+						return true;
+					});
+				it != _constant_lookup.end())
+				return std::get<2>(*it); // Reuse existing constant instead of duplicating the definition
+			else
+				_constant_lookup.push_back({ data_type, data, res });
+
+			// Put constant variable into global scope, so that it can be reused in different blocks
+			std::string &code = _blocks.at(0);
 
 			// Array constants need to be stored in a constant variable as they cannot be used in-place
-			code += '\t';
-			code += "const ";
-			write_type(code, type);
+			code += "static const ";
+			write_type<false, false>(code, data_type);
 			code += ' ' + id_to_name(res);
-			code += '[' + std::to_string(type.array_length) + ']';
+			code += '[' + std::to_string(data_type.array_length) + ']';
 			code += " = ";
-			write_constant(code, type, data);
+			write_constant(code, data_type, data);
 			code += ";\n";
 			return res;
 		}
 
 		std::string code;
-		write_constant(code, type, data);
+		write_constant(code, data_type, data);
 		define_name<naming::expression>(res, std::move(code));
 
 		return res;
@@ -1219,25 +1530,11 @@ private:
 			#include "effect_symbol_table_intrinsics.inl"
 		};
 
-		if (intrinsic == tex2Dstore0)
-			code += "#pragma warning(disable : 3206)\n";
-
 		write_location(code, loc);
 
 		code += '\t';
 
-		if (_shader_model >= 40 && (
-			intrinsic == tex2Dsize0 || intrinsic == tex2Dsize1 || intrinsic == tex2Dsize2 ||
-			intrinsic == atomicAdd0 || intrinsic == atomicAnd0 || intrinsic == atomicOr0  || intrinsic == atomicXor0 ||
-			intrinsic == atomicMin0 || intrinsic == atomicMin1 || intrinsic == atomicMax0 || intrinsic == atomicMax1 ||
-			intrinsic == atomicExchange0 || intrinsic == atomicCompareExchange0))
-		{
-			// Implementation of the 'tex2Dsize' intrinsic passes the result variable into 'GetDimensions' as output argument
-			// Same with the atomic intrinsics, which use the last parameter to return the previous value of the target
-			write_type(code, res_type);
-			code += ' ' + id_to_name(res) + "; ";
-		}
-		else if (!res_type.is_void())
+		if (!res_type.is_void())
 		{
 			write_type(code, res_type);
 			code += ' ' + id_to_name(res) + " = ";
@@ -1253,16 +1550,13 @@ private:
 
 		code += ";\n";
 
-		if (intrinsic == tex2Dstore0)
-			code += "#pragma warning(default : 3206)\n";
-
 		return res;
 	}
-	id   emit_construct(const location &loc, const type &type, const std::vector<expression> &args) override
+	id   emit_construct(const location &loc, const type &res_type, const std::vector<expression> &args) override
 	{
 #ifndef NDEBUG
-		for (const auto &arg : args)
-			assert((arg.type.is_scalar() || type.is_array()) && arg.chain.empty() && arg.base != 0);
+		for (const expression &arg : args)
+			assert((arg.type.is_scalar() || res_type.is_array()) && arg.chain.empty() && arg.base != 0);
 #endif
 
 		const id res = make_id();
@@ -1272,18 +1566,18 @@ private:
 		write_location(code, loc);
 
 		code += '\t';
-		write_type(code, type);
+		write_type(code, res_type);
 		code += ' ' + id_to_name(res);
 
-		if (type.is_array())
-			code += '[' + std::to_string(type.array_length) + ']';
+		if (res_type.is_array())
+			code += '[' + std::to_string(res_type.array_length) + ']';
 
 		code += " = ";
 
-		if (type.is_array())
+		if (res_type.is_array())
 			code += "{ ";
 		else
-			write_type<false, false>(code, type), code += '(';
+			write_type<false, false>(code, res_type), code += '(';
 
 		for (size_t i = 0, num_args = args.size(); i < num_args; ++i)
 		{
@@ -1293,7 +1587,7 @@ private:
 				code += ", ";
 		}
 
-		if (type.is_array())
+		if (res_type.is_array())
 			code += " }";
 		else
 			code += ')';
@@ -1340,7 +1634,7 @@ private:
 		_blocks.erase(true_statement_block);
 		_blocks.erase(false_statement_block);
 	}
-	id   emit_phi(const location &loc, id condition_value, id condition_block, id true_value, id true_statement_block, id false_value, id false_statement_block, const type &type) override
+	id   emit_phi(const location &loc, id condition_value, id condition_block, id true_value, id true_statement_block, id false_value, id false_statement_block, const type &res_type) override
 	{
 		assert(condition_value != 0 && condition_block != 0 && true_value != 0 && true_statement_block != 0 && false_value != 0 && false_statement_block != 0);
 
@@ -1357,7 +1651,7 @@ private:
 		code += _blocks.at(condition_block);
 
 		code += '\t';
-		write_type(code, type);
+		write_type(code, res_type);
 		code += ' ' + id_to_name(res) + ";\n";
 
 		write_location(code, loc);
@@ -1404,8 +1698,8 @@ private:
 		if (condition_block == 0)
 		{
 			// Convert the last SSA variable initializer to an assignment statement
-			auto pos_assign = continue_data.rfind(condition_name);
-			auto pos_prev_assign = continue_data.rfind('\t', pos_assign);
+			const size_t pos_assign = continue_data.rfind(condition_name);
+			const size_t pos_prev_assign = continue_data.rfind('\t', pos_assign);
 			continue_data.erase(pos_prev_assign + 1, pos_assign - pos_prev_assign - 1);
 
 			// We need to add the continue block to all "continue" statements as well
@@ -1442,9 +1736,9 @@ private:
 			if (!use_break_statement_for_condition && std::count(condition_data.begin(), condition_data.end(), '\n') == 1)
 			{
 				// Convert SSA variable initializer back to a condition expression
-				auto pos_assign = condition_data.find('=');
+				const size_t pos_assign = condition_data.find('=');
 				condition_data.erase(0, pos_assign + 2);
-				auto pos_semicolon = condition_data.rfind(';');
+				const size_t pos_semicolon = condition_data.rfind(';');
 				condition_data.erase(pos_semicolon);
 
 				condition_name = std::move(condition_data);
@@ -1457,8 +1751,8 @@ private:
 				increase_indentation_level(condition_data);
 
 				// Convert the last SSA variable initializer to an assignment statement
-				auto pos_assign = condition_data.rfind(condition_name);
-				auto pos_prev_assign = condition_data.rfind('\t', pos_assign);
+				const size_t pos_assign = condition_data.rfind(condition_name);
+				const size_t pos_prev_assign = condition_data.rfind('\t', pos_assign);
 				condition_data.erase(pos_prev_assign + 1, pos_assign - pos_prev_assign - 1);
 			}
 
@@ -1650,7 +1944,7 @@ private:
 
 		code += "\tdiscard;\n";
 
-		const auto &return_type = _functions.back()->return_type;
+		const type &return_type = _functions.back()->return_type;
 		if (!return_type.is_void())
 		{
 			// HLSL compiler doesn't handle discard like a shader kill
@@ -1720,7 +2014,8 @@ private:
 	{
 		assert(_last_block != 0);
 
-		_blocks.at(0) += "{\n" + _blocks.at(_last_block) + "}\n";
+		_blocks.at(0) += _current_function_declaration + "{\n" + _blocks.at(_last_block) + "}\n";
+		_current_function_declaration.clear();
 	}
 };
 

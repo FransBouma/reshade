@@ -6,6 +6,10 @@
 #pragma once
 
 #include <d3d10_1.h>
+#include "com_ptr.hpp"
+#include "reshade_api_pipeline.hpp"
+#include <vector>
+#include <limits>
 
 namespace reshade::d3d10
 {
@@ -32,7 +36,7 @@ namespace reshade::d3d10
 		FLOAT blend_constant[4];
 	};
 
-	struct descriptor_set_impl
+	struct descriptor_table_impl
 	{
 		api::descriptor_type type;
 		uint32_t count;
@@ -45,17 +49,21 @@ namespace reshade::d3d10
 		std::vector<api::descriptor_range> ranges;
 	};
 
-	struct query_pool_impl
+	struct query_heap_impl
 	{
 		std::vector<com_ptr<ID3D10Query>> queries;
 	};
 
-	constexpr api::pipeline_layout global_pipeline_layout = { 0xFFFFFFFFFFFFFFFF };
+	struct fence_impl
+	{
+		uint64_t current_value;
+		com_ptr<ID3D10Query> event_queries[8];
+	};
 
 	auto convert_format(api::format format) -> DXGI_FORMAT;
 	auto convert_format(DXGI_FORMAT format) -> api::format;
 
-	auto convert_access_flags(api::map_access access, bool is_vertex_or_index_buffer) -> D3D10_MAP;
+	auto convert_access_flags(api::map_access access) -> D3D10_MAP;
 	api::map_access convert_access_flags(D3D10_MAP map_type);
 
 	void convert_sampler_desc(const api::sampler_desc &desc, D3D10_SAMPLER_DESC &internal_desc);
@@ -79,8 +87,8 @@ namespace reshade::d3d10
 	api::resource_view_desc convert_resource_view_desc(const D3D10_SHADER_RESOURCE_VIEW_DESC &internal_desc);
 	api::resource_view_desc convert_resource_view_desc(const D3D10_SHADER_RESOURCE_VIEW_DESC1 &internal_desc);
 
-	void convert_input_layout_desc(uint32_t count, const api::input_element *elements, std::vector<D3D10_INPUT_ELEMENT_DESC> &internal_elements);
-	std::vector<api::input_element> convert_input_layout_desc(UINT count, const D3D10_INPUT_ELEMENT_DESC *internal_elements);
+	void convert_input_element(const api::input_element &desc, D3D10_INPUT_ELEMENT_DESC &internal_desc);
+	api::input_element convert_input_element(const D3D10_INPUT_ELEMENT_DESC &internal_desc);
 
 	void convert_blend_desc(const api::blend_desc &desc, D3D10_BLEND_DESC &internal_desc);
 	void convert_blend_desc(const api::blend_desc &desc, D3D10_BLEND_DESC1 &internal_desc);
@@ -117,4 +125,5 @@ namespace reshade::d3d10
 	inline auto to_handle(ID3D10BlendState *ptr) { return api::pipeline { reinterpret_cast<uintptr_t>(ptr) }; }
 	inline auto to_handle(ID3D10RasterizerState *ptr) { return api::pipeline { reinterpret_cast<uintptr_t>(ptr) }; }
 	inline auto to_handle(ID3D10DepthStencilState *ptr) { return api::pipeline { reinterpret_cast<uintptr_t>(ptr) }; }
+	inline auto to_handle(IDXGIKeyedMutex *ptr) { return api::fence { reinterpret_cast<uintptr_t>(ptr) }; }
 }

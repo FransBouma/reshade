@@ -8,6 +8,7 @@
 #include "d3d12_descriptor_heap.hpp"
 #include "d3d12_impl_type_convert.hpp"
 #include "dll_log.hpp"
+#include "addon_manager.hpp"
 
 using reshade::d3d12::to_handle;
 
@@ -16,6 +17,16 @@ D3D12GraphicsCommandList::D3D12GraphicsCommandList(D3D12Device *device, ID3D12Gr
 	_device(device)
 {
 	assert(_orig != nullptr && _device != nullptr);
+
+#if RESHADE_ADDON
+	reshade::invoke_addon_event<reshade::addon_event::init_command_list>(this);
+#endif
+}
+D3D12GraphicsCommandList::~D3D12GraphicsCommandList()
+{
+#if RESHADE_ADDON
+	reshade::invoke_addon_event<reshade::addon_event::destroy_command_list>(this);
+#endif
 }
 
 bool D3D12GraphicsCommandList::check_and_upgrade_interface(REFIID riid)
@@ -27,7 +38,7 @@ bool D3D12GraphicsCommandList::check_and_upgrade_interface(REFIID riid)
 		riid == __uuidof(ID3D12CommandList))
 		return true;
 
-	static const IID iid_lookup[] = {
+	static constexpr IID iid_lookup[] = {
 		__uuidof(ID3D12GraphicsCommandList),
 		__uuidof(ID3D12GraphicsCommandList1),
 		__uuidof(ID3D12GraphicsCommandList2),
@@ -37,9 +48,11 @@ bool D3D12GraphicsCommandList::check_and_upgrade_interface(REFIID riid)
 		__uuidof(ID3D12GraphicsCommandList6),
 		__uuidof(ID3D12GraphicsCommandList7),
 		__uuidof(ID3D12GraphicsCommandList8),
+		__uuidof(ID3D12GraphicsCommandList9),
+		__uuidof(ID3D12GraphicsCommandList10),
 	};
 
-	for (unsigned int version = 0; version < ARRAYSIZE(iid_lookup); ++version)
+	for (unsigned short version = 0; version < ARRAYSIZE(iid_lookup); ++version)
 	{
 		if (riid != iid_lookup[version])
 			continue;
@@ -149,9 +162,13 @@ HRESULT STDMETHODCALLTYPE D3D12GraphicsCommandList::Reset(ID3D12CommandAllocator
 	_current_root_signature[1] = nullptr;
 	_current_descriptor_heaps[0] = nullptr;
 	_current_descriptor_heaps[1] = nullptr;
+#if RESHADE_ADDON >= 2
+	_previous_descriptor_heaps[0] = nullptr;
+	_previous_descriptor_heaps[1] = nullptr;
+#endif
 
 	const HRESULT hr = _orig->Reset(pAllocator, pInitialState);
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 	if (SUCCEEDED(hr))
 	{
 		// Only invoke event if there actually is an initial state to bind, otherwise expect things were already handled by the 'reset_command_list' event above
@@ -167,18 +184,26 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::ClearState(ID3D12PipelineState 
 {
 	_orig->ClearState(pPipelineState);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+	_current_root_signature[0] = nullptr;
+	_current_root_signature[1] = nullptr;
+	_current_descriptor_heaps[0] = nullptr;
+	_current_descriptor_heaps[1] = nullptr;
+#if RESHADE_ADDON >= 2
+	_previous_descriptor_heaps[0] = nullptr;
+	_previous_descriptor_heaps[1] = nullptr;
+
 	reshade::invoke_addon_event<reshade::addon_event::bind_pipeline>(this, reshade::api::pipeline_stage::all, to_handle(pPipelineState));
 
-	// When ClearState is called, all currently bound resources are unbound. The primitive topology is set to D3D_PRIMITIVE_TOPOLOGY_UNDEFINED. Viewports, scissor rectangles, stencil reference value, and the blend factor are set to empty values (all zeros).
-	const reshade::api::dynamic_state states[3] = { reshade::api::dynamic_state::primitive_topology, reshade::api::dynamic_state::blend_constant, reshade::api::dynamic_state::stencil_reference_value };
-	const uint32_t values[3] = { static_cast<uint32_t>(reshade::api::primitive_topology::undefined), 0, 0 };
-	reshade::invoke_addon_event<reshade::addon_event::bind_pipeline_states>(this, 3, states, values);
+	// When ClearState is called, all currently bound resources are unbound.
+	// The primitive topology is set to D3D_PRIMITIVE_TOPOLOGY_UNDEFINED. Viewports, scissor rectangles, stencil reference value, and the blend factor are set to empty values (all zeros).
+	const reshade::api::dynamic_state states[4] = { reshade::api::dynamic_state::primitive_topology, reshade::api::dynamic_state::blend_constant, reshade::api::dynamic_state::front_stencil_reference_value, reshade::api::dynamic_state::back_stencil_reference_value };
+	const uint32_t values[4] = { static_cast<uint32_t>(reshade::api::primitive_topology::undefined), 0, 0, 0 };
+	reshade::invoke_addon_event<reshade::addon_event::bind_pipeline_states>(this, static_cast<uint32_t>(std::size(states)), states, values);
 
 	constexpr size_t max_null_objects = D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT * 2;
 	void *const null_objects[max_null_objects] = {};
 
-	reshade::invoke_addon_event<reshade::addon_event::bind_descriptor_sets>(this, reshade::api::shader_stage::all, reshade::api::pipeline_layout {}, 0, 0, nullptr);
+	reshade::invoke_addon_event<reshade::addon_event::bind_descriptor_tables>(this, reshade::api::shader_stage::all, reshade::api::pipeline_layout {}, 0, 0, nullptr);
 
 	reshade::invoke_addon_event<reshade::addon_event::bind_index_buffer>(this, reshade::api::resource {}, 0, 0);
 	reshade::invoke_addon_event<reshade::addon_event::bind_vertex_buffers>(this, 0, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT, reinterpret_cast<const reshade::api::resource *>(null_objects), reinterpret_cast<const uint64_t *>(null_objects), reinterpret_cast<const uint32_t *>(null_objects));
@@ -217,7 +242,7 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::CopyBufferRegion(ID3D12Resource
 {
 	assert(pDstBuffer != nullptr && pSrcBuffer != nullptr);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 	if (reshade::invoke_addon_event<reshade::addon_event::copy_buffer_region>(this, to_handle(pSrcBuffer), SrcOffset, to_handle(pDstBuffer), DstOffset, NumBytes))
 		return;
 #endif
@@ -227,7 +252,7 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::CopyTextureRegion(const D3D12_T
 {
 	assert(pDst != nullptr && pSrc != nullptr && pDst->pResource != nullptr && pSrc->pResource != nullptr);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 	if (pSrc->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX && pDst->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX &&
 		reshade::has_addon_event<reshade::addon_event::copy_texture_region>())
 	{
@@ -324,7 +349,7 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::CopyResource(ID3D12Resource *pD
 {
 	assert(pDstResource != nullptr && pSrcResource != nullptr);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 	if (reshade::invoke_addon_event<reshade::addon_event::copy_resource>(this, to_handle(pSrcResource), to_handle(pDstResource)))
 		return;
 #endif
@@ -338,7 +363,7 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::ResolveSubresource(ID3D12Resour
 {
 	assert(pDstResource != nullptr && pSrcResource != nullptr);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 	if (reshade::invoke_addon_event<reshade::addon_event::resolve_texture_region>(this, to_handle(pSrcResource), SrcSubresource, nullptr, to_handle(pDstResource), DstSubresource, 0, 0, 0, reshade::d3d12::convert_format(Format)))
 		return;
 #endif
@@ -348,10 +373,11 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::IASetPrimitiveTopology(D3D12_PR
 {
 	_orig->IASetPrimitiveTopology(PrimitiveTopology);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
-	const reshade::api::dynamic_state state = reshade::api::dynamic_state::primitive_topology;
-	const uint32_t value = static_cast<uint32_t>(reshade::d3d12::convert_primitive_topology(PrimitiveTopology));
-	reshade::invoke_addon_event<reshade::addon_event::bind_pipeline_states>(this, 1, &state, &value);
+#if RESHADE_ADDON >= 2
+	const reshade::api::dynamic_state states[1] = { reshade::api::dynamic_state::primitive_topology };
+	const uint32_t values[1] = { static_cast<uint32_t>(reshade::d3d12::convert_primitive_topology(PrimitiveTopology)) };
+
+	reshade::invoke_addon_event<reshade::addon_event::bind_pipeline_states>(this, static_cast<uint32_t>(std::size(states)), states, values);
 #endif
 }
 void STDMETHODCALLTYPE D3D12GraphicsCommandList::RSSetViewports(UINT NumViewports, const D3D12_VIEWPORT *pViewports)
@@ -374,32 +400,34 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::OMSetBlendFactor(const FLOAT Bl
 {
 	_orig->OMSetBlendFactor(BlendFactor);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
-	const reshade::api::dynamic_state state = reshade::api::dynamic_state::blend_constant;
-	const uint32_t value = (BlendFactor == nullptr) ? 0xFFFFFFFF : // Default blend factor is { 1, 1, 1, 1 }
-		((static_cast<uint32_t>(BlendFactor[0] * 255.f) & 0xFF)) |
-		((static_cast<uint32_t>(BlendFactor[1] * 255.f) & 0xFF) << 8) |
-		((static_cast<uint32_t>(BlendFactor[2] * 255.f) & 0xFF) << 16) |
-		((static_cast<uint32_t>(BlendFactor[3] * 255.f) & 0xFF) << 24);
-	reshade::invoke_addon_event<reshade::addon_event::bind_pipeline_states>(this, 1, &state, &value);
+#if RESHADE_ADDON >= 2
+	const reshade::api::dynamic_state states[1] = { reshade::api::dynamic_state::blend_constant };
+	const uint32_t values[1] = {
+		(BlendFactor == nullptr) ? 0xFFFFFFFF : // Default blend factor is { 1, 1, 1, 1 }, see D3D12_DEFAULT_BLEND_FACTOR_*
+			((static_cast<uint32_t>(BlendFactor[0] * 255.f) & 0xFF)) |
+			((static_cast<uint32_t>(BlendFactor[1] * 255.f) & 0xFF) << 8) |
+			((static_cast<uint32_t>(BlendFactor[2] * 255.f) & 0xFF) << 16) |
+			((static_cast<uint32_t>(BlendFactor[3] * 255.f) & 0xFF) << 24) };
+
+	reshade::invoke_addon_event<reshade::addon_event::bind_pipeline_states>(this, static_cast<uint32_t>(std::size(states)), states, values);
 #endif
 }
 void STDMETHODCALLTYPE D3D12GraphicsCommandList::OMSetStencilRef(UINT StencilRef)
 {
 	_orig->OMSetStencilRef(StencilRef);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
-	const reshade::api::dynamic_state state = reshade::api::dynamic_state::stencil_reference_value;
-	reshade::invoke_addon_event<reshade::addon_event::bind_pipeline_states>(this, 1, &state, &StencilRef);
+#if RESHADE_ADDON >= 2
+	const reshade::api::dynamic_state states[2] = { reshade::api::dynamic_state::front_stencil_reference_value, reshade::api::dynamic_state::back_stencil_reference_value };
+	const uint32_t values[2] = { StencilRef, StencilRef };
+
+	reshade::invoke_addon_event<reshade::addon_event::bind_pipeline_states>(this, static_cast<uint32_t>(std::size(states)), states, values);
 #endif
 }
 void STDMETHODCALLTYPE D3D12GraphicsCommandList::SetPipelineState(ID3D12PipelineState *pPipelineState)
 {
 	_orig->SetPipelineState(pPipelineState);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
-	_current_pipeline_state = pPipelineState;
-
+#if RESHADE_ADDON >= 2
 	reshade::invoke_addon_event<reshade::addon_event::bind_pipeline>(this, reshade::api::pipeline_stage::all, to_handle(pPipelineState));
 #endif
 }
@@ -407,7 +435,7 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::ResourceBarrier(UINT NumBarrier
 {
 	_orig->ResourceBarrier(NumBarriers, pBarriers);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 	if (!reshade::has_addon_event<reshade::addon_event::barrier>())
 		return;
 
@@ -455,7 +483,7 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::SetDescriptorHeaps(UINT NumDesc
 {
 	assert(NumDescriptorHeaps <= 2);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 	temp_mem<ID3D12DescriptorHeap *, 2> heaps(NumDescriptorHeaps);
 	for (UINT i = 0; i < NumDescriptorHeaps; ++i)
 		heaps[i] = static_cast<D3D12DescriptorHeap *>(ppDescriptorHeaps[i])->_orig;
@@ -465,7 +493,12 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::SetDescriptorHeaps(UINT NumDesc
 	_orig->SetDescriptorHeaps(NumDescriptorHeaps, ppDescriptorHeaps);
 
 	for (UINT i = 0; i < 2; ++i)
+	{
 		_current_descriptor_heaps[i] = i < NumDescriptorHeaps ? ppDescriptorHeaps[i] : nullptr;
+#if RESHADE_ADDON >= 2
+		_previous_descriptor_heaps[i] = _current_descriptor_heaps[i];
+#endif
+	}
 }
 void STDMETHODCALLTYPE D3D12GraphicsCommandList::SetComputeRootSignature(ID3D12RootSignature *pRootSignature)
 {
@@ -473,10 +506,10 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::SetComputeRootSignature(ID3D12R
 
 	_current_root_signature[1] = pRootSignature;
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
-	reshade::invoke_addon_event<reshade::addon_event::bind_descriptor_sets>(
+#if RESHADE_ADDON >= 2
+	reshade::invoke_addon_event<reshade::addon_event::bind_descriptor_tables>(
 		this,
-		reshade::api::shader_stage::all_compute,
+		reshade::api::shader_stage::all_compute | reshade::api::shader_stage::all_ray_tracing,
 		to_handle(_current_root_signature[1]),
 		0,
 		0, nullptr);
@@ -488,8 +521,8 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::SetGraphicsRootSignature(ID3D12
 
 	_current_root_signature[0] = pRootSignature;
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
-	reshade::invoke_addon_event<reshade::addon_event::bind_descriptor_sets>(
+#if RESHADE_ADDON >= 2
+	reshade::invoke_addon_event<reshade::addon_event::bind_descriptor_tables>(
 		this,
 		reshade::api::shader_stage::all_graphics,
 		to_handle(_current_root_signature[0]),
@@ -501,44 +534,36 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::SetComputeRootDescriptorTable(U
 {
 	_orig->SetComputeRootDescriptorTable(RootParameterIndex, BaseDescriptor);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
-	if (!reshade::has_addon_event<reshade::addon_event::bind_descriptor_sets>())
-		return;
-
-	const reshade::api::descriptor_set set = _device_impl->convert_to_descriptor_set(BaseDescriptor);
-	reshade::invoke_addon_event<reshade::addon_event::bind_descriptor_sets>(
+#if RESHADE_ADDON >= 2
+	reshade::invoke_addon_event<reshade::addon_event::bind_descriptor_tables>(
 		this,
-		reshade::api::shader_stage::all_compute,
+		reshade::api::shader_stage::all_compute | reshade::api::shader_stage::all_ray_tracing,
 		to_handle(_current_root_signature[1]),
 		RootParameterIndex,
-		1, &set);
+		1, reinterpret_cast<const reshade::api::descriptor_table *>(&BaseDescriptor));
 #endif
 }
 void STDMETHODCALLTYPE D3D12GraphicsCommandList::SetGraphicsRootDescriptorTable(UINT RootParameterIndex, D3D12_GPU_DESCRIPTOR_HANDLE BaseDescriptor)
 {
 	_orig->SetGraphicsRootDescriptorTable(RootParameterIndex, BaseDescriptor);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
-	if (!reshade::has_addon_event<reshade::addon_event::bind_descriptor_sets>())
-		return;
-
-	const reshade::api::descriptor_set set = _device_impl->convert_to_descriptor_set(BaseDescriptor);
-	reshade::invoke_addon_event<reshade::addon_event::bind_descriptor_sets>(
+#if RESHADE_ADDON >= 2
+	reshade::invoke_addon_event<reshade::addon_event::bind_descriptor_tables>(
 		this,
 		reshade::api::shader_stage::all_graphics,
 		to_handle(_current_root_signature[0]),
 		RootParameterIndex,
-		1, &set);
+		1, reinterpret_cast<const reshade::api::descriptor_table *>(&BaseDescriptor));
 #endif
 }
 void STDMETHODCALLTYPE D3D12GraphicsCommandList::SetComputeRoot32BitConstant(UINT RootParameterIndex, UINT SrcData, UINT DestOffsetIn32BitValues)
 {
 	_orig->SetComputeRoot32BitConstant(RootParameterIndex, SrcData, DestOffsetIn32BitValues);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 	reshade::invoke_addon_event<reshade::addon_event::push_constants>(
 		this,
-		reshade::api::shader_stage::all_compute,
+		reshade::api::shader_stage::all_compute | reshade::api::shader_stage::all_ray_tracing,
 		to_handle(_current_root_signature[1]),
 		RootParameterIndex,
 		DestOffsetIn32BitValues,
@@ -549,7 +574,7 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::SetGraphicsRoot32BitConstant(UI
 {
 	_orig->SetGraphicsRoot32BitConstant(RootParameterIndex, SrcData, DestOffsetIn32BitValues);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 	reshade::invoke_addon_event<reshade::addon_event::push_constants>(
 		this,
 		reshade::api::shader_stage::all_graphics,
@@ -563,10 +588,10 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::SetComputeRoot32BitConstants(UI
 {
 	_orig->SetComputeRoot32BitConstants(RootParameterIndex, Num32BitValuesToSet, pSrcData, DestOffsetIn32BitValues);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 	reshade::invoke_addon_event<reshade::addon_event::push_constants>(
 		this,
-		reshade::api::shader_stage::all_compute,
+		reshade::api::shader_stage::all_compute | reshade::api::shader_stage::all_ray_tracing,
 		to_handle(_current_root_signature[1]),
 		RootParameterIndex,
 		DestOffsetIn32BitValues,
@@ -577,7 +602,7 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::SetGraphicsRoot32BitConstants(U
 {
 	_orig->SetGraphicsRoot32BitConstants(RootParameterIndex, Num32BitValuesToSet, pSrcData, DestOffsetIn32BitValues);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 	reshade::invoke_addon_event<reshade::addon_event::push_constants>(
 		this,
 		reshade::api::shader_stage::all_graphics,
@@ -591,7 +616,7 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::SetComputeRootConstantBufferVie
 {
 	_orig->SetComputeRootConstantBufferView(RootParameterIndex, BufferLocation);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 	if (!reshade::has_addon_event<reshade::addon_event::push_descriptors>())
 		return;
 
@@ -602,17 +627,17 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::SetComputeRootConstantBufferVie
 
 	reshade::invoke_addon_event<reshade::addon_event::push_descriptors>(
 		this,
-		reshade::api::shader_stage::all_compute,
+		reshade::api::shader_stage::all_compute | reshade::api::shader_stage::all_ray_tracing,
 		to_handle(_current_root_signature[1]),
 		RootParameterIndex,
-		reshade::api::descriptor_set_update { {}, 0, 0, 1, reshade::api::descriptor_type::constant_buffer, &buffer_range });
+		reshade::api::descriptor_table_update { {}, 0, 0, 1, reshade::api::descriptor_type::constant_buffer, &buffer_range });
 #endif
 }
 void STDMETHODCALLTYPE D3D12GraphicsCommandList::SetGraphicsRootConstantBufferView(UINT RootParameterIndex, D3D12_GPU_VIRTUAL_ADDRESS BufferLocation)
 {
 	_orig->SetGraphicsRootConstantBufferView(RootParameterIndex, BufferLocation);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 	if (!reshade::has_addon_event<reshade::addon_event::push_descriptors>())
 		return;
 
@@ -626,98 +651,79 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::SetGraphicsRootConstantBufferVi
 		reshade::api::shader_stage::all_graphics,
 		to_handle(_current_root_signature[0]),
 		RootParameterIndex,
-		reshade::api::descriptor_set_update { {}, 0, 0, 1, reshade::api::descriptor_type::constant_buffer, &buffer_range });
+		reshade::api::descriptor_table_update { {}, 0, 0, 1, reshade::api::descriptor_type::constant_buffer, &buffer_range });
 #endif
 }
 void STDMETHODCALLTYPE D3D12GraphicsCommandList::SetComputeRootShaderResourceView(UINT RootParameterIndex, D3D12_GPU_VIRTUAL_ADDRESS BufferLocation)
 {
 	_orig->SetComputeRootShaderResourceView(RootParameterIndex, BufferLocation);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 	if (!reshade::has_addon_event<reshade::addon_event::push_descriptors>())
 		return;
 
 	reshade::api::buffer_range buffer_range;
-	if (!_device_impl->resolve_gpu_address(BufferLocation, &buffer_range.buffer, &buffer_range.offset))
+	bool acceleration_structure;
+	if (!_device_impl->resolve_gpu_address(BufferLocation, &buffer_range.buffer, &buffer_range.offset, &acceleration_structure))
 		return;
 	buffer_range.size = UINT64_MAX;
 
+	// TODO: Get a working 'resource_view' handle for the SRV that can be passed as descriptor update, when it is not an acceleration structure
 	reshade::invoke_addon_event<reshade::addon_event::push_descriptors>(
 		this,
-		reshade::api::shader_stage::all_compute,
+		reshade::api::shader_stage::all_compute | reshade::api::shader_stage::all_ray_tracing,
 		to_handle(_current_root_signature[1]),
 		RootParameterIndex,
-		reshade::api::descriptor_set_update { {}, 0, 0, 1, reshade::api::descriptor_type::shader_resource_view, &buffer_range });
+		reshade::api::descriptor_table_update { {}, 0, 0, 1, acceleration_structure ? reshade::api::descriptor_type::acceleration_structure : reshade::api::descriptor_type::buffer_shader_resource_view, &BufferLocation });
 #endif
 }
 void STDMETHODCALLTYPE D3D12GraphicsCommandList::SetGraphicsRootShaderResourceView(UINT RootParameterIndex, D3D12_GPU_VIRTUAL_ADDRESS BufferLocation)
 {
 	_orig->SetGraphicsRootShaderResourceView(RootParameterIndex, BufferLocation);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
-	if (!reshade::has_addon_event<reshade::addon_event::push_descriptors>())
-		return;
-
-	reshade::api::buffer_range buffer_range;
-	if (!_device_impl->resolve_gpu_address(BufferLocation, &buffer_range.buffer, &buffer_range.offset))
-		return;
-	buffer_range.size = UINT64_MAX;
-
+#if RESHADE_ADDON >= 2
+	// TODO: Get a working 'resource_view' handle for the SRV that can be passed as descriptor update
 	reshade::invoke_addon_event<reshade::addon_event::push_descriptors>(
 		this,
 		reshade::api::shader_stage::all_graphics,
 		to_handle(_current_root_signature[0]),
 		RootParameterIndex,
-		reshade::api::descriptor_set_update { {}, 0, 0, 1, reshade::api::descriptor_type::shader_resource_view, &buffer_range });
+		reshade::api::descriptor_table_update { {}, 0, 0, 1, reshade::api::descriptor_type::buffer_shader_resource_view, &BufferLocation });
 #endif
 }
 void STDMETHODCALLTYPE D3D12GraphicsCommandList::SetComputeRootUnorderedAccessView(UINT RootParameterIndex, D3D12_GPU_VIRTUAL_ADDRESS BufferLocation)
 {
 	_orig->SetComputeRootUnorderedAccessView(RootParameterIndex, BufferLocation);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
-	if (!reshade::has_addon_event<reshade::addon_event::push_descriptors>())
-		return;
-
-	reshade::api::buffer_range buffer_range;
-	if (!_device_impl->resolve_gpu_address(BufferLocation, &buffer_range.buffer, &buffer_range.offset))
-		return;
-	buffer_range.size = UINT64_MAX;
-
+#if RESHADE_ADDON >= 2
+	// TODO: Get a working 'resource_view' handle for the UAV that can be passed as descriptor update
 	reshade::invoke_addon_event<reshade::addon_event::push_descriptors>(
 		this,
-		reshade::api::shader_stage::all_compute,
+		reshade::api::shader_stage::all_compute | reshade::api::shader_stage::all_ray_tracing,
 		to_handle(_current_root_signature[1]),
 		RootParameterIndex,
-		reshade::api::descriptor_set_update { {}, 0, 0, 1, reshade::api::descriptor_type::unordered_access_view, &buffer_range });
+		reshade::api::descriptor_table_update { {}, 0, 0, 1, reshade::api::descriptor_type::buffer_unordered_access_view, &BufferLocation });
 #endif
 }
 void STDMETHODCALLTYPE D3D12GraphicsCommandList::SetGraphicsRootUnorderedAccessView(UINT RootParameterIndex, D3D12_GPU_VIRTUAL_ADDRESS BufferLocation)
 {
 	_orig->SetGraphicsRootUnorderedAccessView(RootParameterIndex, BufferLocation);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
-	if (!reshade::has_addon_event<reshade::addon_event::push_descriptors>())
-		return;
-
-	reshade::api::buffer_range buffer_range;
-	if (!_device_impl->resolve_gpu_address(BufferLocation, &buffer_range.buffer, &buffer_range.offset))
-		return;
-	buffer_range.size = UINT64_MAX;
-
+#if RESHADE_ADDON >= 2
+	// TODO: Get a working 'resource_view' handle for the UAV that can be passed as descriptor update
 	reshade::invoke_addon_event<reshade::addon_event::push_descriptors>(
 		this,
 		reshade::api::shader_stage::all_graphics,
 		to_handle(_current_root_signature[0]),
 		RootParameterIndex,
-		reshade::api::descriptor_set_update { {}, 0, 0, 1, reshade::api::descriptor_type::unordered_access_view, &buffer_range });
+		reshade::api::descriptor_table_update { {}, 0, 0, 1, reshade::api::descriptor_type::buffer_unordered_access_view, &BufferLocation });
 #endif
 }
 void STDMETHODCALLTYPE D3D12GraphicsCommandList::IASetIndexBuffer(const D3D12_INDEX_BUFFER_VIEW *pView)
 {
 	_orig->IASetIndexBuffer(pView);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 	if (!reshade::has_addon_event<reshade::addon_event::bind_index_buffer>())
 		return;
 
@@ -739,7 +745,7 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::IASetVertexBuffers(UINT StartSl
 {
 	_orig->IASetVertexBuffers(StartSlot, NumViews, pViews);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 	if (!reshade::has_addon_event<reshade::addon_event::bind_vertex_buffers>())
 		return;
 
@@ -768,7 +774,7 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::SOSetTargets(UINT StartSlot, UI
 {
 	_orig->SOSetTargets(StartSlot, NumViews, pViews);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 	if (!reshade::has_addon_event<reshade::addon_event::bind_stream_output_buffers>())
 		return;
 
@@ -830,8 +836,8 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::ClearRenderTargetView(D3D12_CPU
 }
 void STDMETHODCALLTYPE D3D12GraphicsCommandList::ClearUnorderedAccessViewUint(D3D12_GPU_DESCRIPTOR_HANDLE ViewGPUHandleInCurrentHeap, D3D12_CPU_DESCRIPTOR_HANDLE ViewCPUHandle, ID3D12Resource *pResource, const UINT Values[4], UINT NumRects, const D3D12_RECT *pRects)
 {
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
-	ViewCPUHandle = _device_impl->convert_to_original_cpu_descriptor_handle(ViewCPUHandle);
+#if RESHADE_ADDON >= 2
+	ViewCPUHandle = _device_impl->convert_to_original_cpu_descriptor_handle(_device_impl->convert_to_descriptor_table(ViewCPUHandle));
 #endif
 
 #if RESHADE_ADDON
@@ -842,8 +848,8 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::ClearUnorderedAccessViewUint(D3
 }
 void STDMETHODCALLTYPE D3D12GraphicsCommandList::ClearUnorderedAccessViewFloat(D3D12_GPU_DESCRIPTOR_HANDLE ViewGPUHandleInCurrentHeap, D3D12_CPU_DESCRIPTOR_HANDLE ViewCPUHandle, ID3D12Resource *pResource, const FLOAT Values[4], UINT NumRects, const D3D12_RECT *pRects)
 {
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
-	ViewCPUHandle = _device_impl->convert_to_original_cpu_descriptor_handle(ViewCPUHandle);
+#if RESHADE_ADDON >= 2
+	ViewCPUHandle = _device_impl->convert_to_original_cpu_descriptor_handle(_device_impl->convert_to_descriptor_table(ViewCPUHandle));
 #endif
 
 #if RESHADE_ADDON
@@ -858,7 +864,7 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::DiscardResource(ID3D12Resource 
 }
 void STDMETHODCALLTYPE D3D12GraphicsCommandList::BeginQuery(ID3D12QueryHeap *pQueryHeap, D3D12_QUERY_TYPE Type, UINT Index)
 {
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 	if (reshade::invoke_addon_event<reshade::addon_event::begin_query>(this, to_handle(pQueryHeap), reshade::d3d12::convert_query_type(Type), Index))
 		return;
 #endif
@@ -866,7 +872,7 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::BeginQuery(ID3D12QueryHeap *pQu
 }
 void STDMETHODCALLTYPE D3D12GraphicsCommandList::EndQuery(ID3D12QueryHeap *pQueryHeap, D3D12_QUERY_TYPE Type, UINT Index)
 {
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 	if (reshade::invoke_addon_event<reshade::addon_event::end_query>(this, to_handle(pQueryHeap), reshade::d3d12::convert_query_type(Type), Index))
 		return;
 #endif
@@ -874,8 +880,8 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::EndQuery(ID3D12QueryHeap *pQuer
 }
 void STDMETHODCALLTYPE D3D12GraphicsCommandList::ResolveQueryData(ID3D12QueryHeap *pQueryHeap, D3D12_QUERY_TYPE Type, UINT StartIndex, UINT NumQueries, ID3D12Resource *pDestinationBuffer, UINT64 AlignedDestinationBufferOffset)
 {
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
-	if (reshade::invoke_addon_event<reshade::addon_event::copy_query_pool_results>(this, to_handle(pQueryHeap), reshade::d3d12::convert_query_type(Type), StartIndex, NumQueries, to_handle(pDestinationBuffer), AlignedDestinationBufferOffset, static_cast<uint32_t>(sizeof(uint64_t))))
+#if RESHADE_ADDON >= 2
+	if (reshade::invoke_addon_event<reshade::addon_event::copy_query_heap_results>(this, to_handle(pQueryHeap), reshade::d3d12::convert_query_type(Type), StartIndex, NumQueries, to_handle(pDestinationBuffer), AlignedDestinationBufferOffset, static_cast<uint32_t>(sizeof(uint64_t))))
 		return;
 #endif
 	_orig->ResolveQueryData(pQueryHeap, Type, StartIndex, NumQueries, pDestinationBuffer, AlignedDestinationBufferOffset);
@@ -929,7 +935,7 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::ResolveSubresourceRegion(ID3D12
 {
 	assert(pDstResource != nullptr && pSrcResource != nullptr);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 	const bool use_src_box = pSrcRect != nullptr;
 	reshade::api::subresource_box src_box;
 
@@ -1019,6 +1025,38 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::ExecuteMetaCommand(ID3D12MetaCo
 }
 void STDMETHODCALLTYPE D3D12GraphicsCommandList::BuildRaytracingAccelerationStructure(const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC *pDesc, UINT NumPostbuildInfoDescs, const D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC *pPostbuildInfoDescs)
 {
+	assert(pDesc != nullptr);
+
+#if RESHADE_ADDON >= 2
+	if (reshade::has_addon_event<reshade::addon_event::build_acceleration_structure>())
+	{
+		std::vector<reshade::api::acceleration_structure_build_input> build_inputs;
+		if (pDesc->Inputs.Type == D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL)
+		{
+			build_inputs.push_back({ reshade::api::resource {}, pDesc->Inputs.InstanceDescs, pDesc->Inputs.NumDescs, pDesc->Inputs.DescsLayout == D3D12_ELEMENTS_LAYOUT_ARRAY_OF_POINTERS });
+		}
+		else
+		{
+			build_inputs.reserve(pDesc->Inputs.NumDescs);
+			for (UINT k = 0; k < pDesc->Inputs.NumDescs; ++k)
+				build_inputs.push_back(reshade::d3d12::convert_acceleration_structure_build_input(pDesc->Inputs.DescsLayout == D3D12_ELEMENTS_LAYOUT_ARRAY_OF_POINTERS ? *pDesc->Inputs.ppGeometryDescs[k] : pDesc->Inputs.pGeometryDescs[k]));
+		}
+
+		if (reshade::invoke_addon_event<reshade::addon_event::build_acceleration_structure>(
+				this,
+				reshade::d3d12::convert_acceleration_structure_type(pDesc->Inputs.Type),
+				reshade::d3d12::convert_acceleration_structure_build_flags(pDesc->Inputs.Flags),
+				static_cast<uint32_t>(build_inputs.size()),
+				build_inputs.data(),
+				reshade::api::resource {},
+				pDesc->ScratchAccelerationStructureData,
+				reshade::api::resource_view { pDesc->SourceAccelerationStructureData },
+				reshade::api::resource_view { pDesc->DestAccelerationStructureData },
+				(pDesc->Inputs.Flags & D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE) != 0 ? reshade::api::acceleration_structure_build_mode::update : reshade::api::acceleration_structure_build_mode::build))
+			return;
+	}
+#endif
+
 	assert(_interface_version >= 4);
 	static_cast<ID3D12GraphicsCommandList4 *>(_orig)->BuildRaytracingAccelerationStructure(pDesc, NumPostbuildInfoDescs, pPostbuildInfoDescs);
 }
@@ -1029,6 +1067,14 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::EmitRaytracingAccelerationStruc
 }
 void STDMETHODCALLTYPE D3D12GraphicsCommandList::CopyRaytracingAccelerationStructure(D3D12_GPU_VIRTUAL_ADDRESS DestAccelerationStructureData, D3D12_GPU_VIRTUAL_ADDRESS SourceAccelerationStructureData, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE Mode)
 {
+#if RESHADE_ADDON >= 2
+	if (reshade::invoke_addon_event<reshade::addon_event::copy_acceleration_structure>(
+			this,
+			reshade::api::resource_view { SourceAccelerationStructureData },
+			reshade::api::resource_view { DestAccelerationStructureData },
+			reshade::d3d12::convert_acceleration_structure_copy_mode(Mode)))
+		return;
+#endif
 	assert(_interface_version >= 4);
 	static_cast<ID3D12GraphicsCommandList4 *>(_orig)->CopyRaytracingAccelerationStructure(DestAccelerationStructureData, SourceAccelerationStructureData, Mode);
 }
@@ -1037,12 +1083,36 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::SetPipelineState1(ID3D12StateOb
 	assert(_interface_version >= 4);
 	static_cast<ID3D12GraphicsCommandList4 *>(_orig)->SetPipelineState1(pStateObject);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
-	_current_pipeline_state = pStateObject;
+#if RESHADE_ADDON >= 2
+	// Currently 'SetPipelineState1' is only used for setting ray tracing pipeline state
+	reshade::invoke_addon_event<reshade::addon_event::bind_pipeline>(this, reshade::api::pipeline_stage::all_ray_tracing, to_handle(pStateObject));
 #endif
 }
 void STDMETHODCALLTYPE D3D12GraphicsCommandList::DispatchRays(const D3D12_DISPATCH_RAYS_DESC *pDesc)
 {
+	assert(pDesc != nullptr);
+
+#if RESHADE_ADDON
+	if (reshade::invoke_addon_event<reshade::addon_event::dispatch_rays>(
+			this,
+			reshade::api::resource {},
+			pDesc->RayGenerationShaderRecord.StartAddress,
+			pDesc->RayGenerationShaderRecord.SizeInBytes,
+			reshade::api::resource {},
+			pDesc->MissShaderTable.StartAddress,
+			pDesc->MissShaderTable.SizeInBytes,
+			pDesc->MissShaderTable.StrideInBytes,
+			reshade::api::resource {},
+			pDesc->HitGroupTable.StartAddress,
+			pDesc->HitGroupTable.SizeInBytes,
+			pDesc->HitGroupTable.StrideInBytes,
+			reshade::api::resource {},
+			pDesc->CallableShaderTable.StartAddress,
+			pDesc->CallableShaderTable.SizeInBytes,
+			pDesc->CallableShaderTable.StrideInBytes,
+			pDesc->Width, pDesc->Height, pDesc->Depth))
+		return;
+#endif
 	assert(_interface_version >= 4);
 	static_cast<ID3D12GraphicsCommandList4 *>(_orig)->DispatchRays(pDesc);
 }
@@ -1060,6 +1130,10 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::RSSetShadingRateImage(ID3D12Res
 
 void STDMETHODCALLTYPE D3D12GraphicsCommandList::DispatchMesh(UINT ThreadGroupCountX, UINT ThreadGroupCountY, UINT ThreadGroupCountZ)
 {
+#if RESHADE_ADDON
+	if (reshade::invoke_addon_event<reshade::addon_event::dispatch_mesh>(this, ThreadGroupCountX, ThreadGroupCountX, ThreadGroupCountZ))
+		return;
+#endif
 	assert(_interface_version >= 6);
 	static_cast<ID3D12GraphicsCommandList6 *>(_orig)->DispatchMesh(ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
 }
@@ -1069,7 +1143,7 @@ void STDMETHODCALLTYPE D3D12GraphicsCommandList::Barrier(UINT32 NumBarrierGroups
 	assert(_interface_version >= 7);
 	static_cast<ID3D12GraphicsCommandList7 *>(_orig)->Barrier(NumBarrierGroups, pBarrierGroups);
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 	if (!reshade::has_addon_event<reshade::addon_event::barrier>())
 		return;
 
@@ -1110,4 +1184,40 @@ void   STDMETHODCALLTYPE D3D12GraphicsCommandList::OMSetFrontAndBackStencilRef(U
 {
 	assert(_interface_version >= 8);
 	static_cast<ID3D12GraphicsCommandList8 *>(_orig)->OMSetFrontAndBackStencilRef(FrontStencilRef, BackStencilRef);
+
+#if RESHADE_ADDON >= 2
+	const reshade::api::dynamic_state states[2] = { reshade::api::dynamic_state::front_stencil_reference_value, reshade::api::dynamic_state::back_stencil_reference_value };
+	const uint32_t values[2] = { FrontStencilRef, BackStencilRef };
+
+	reshade::invoke_addon_event<reshade::addon_event::bind_pipeline_states>(this, static_cast<uint32_t>(std::size(states)), states, values);
+#endif
+}
+
+void   STDMETHODCALLTYPE D3D12GraphicsCommandList::RSSetDepthBias(FLOAT DepthBias, FLOAT DepthBiasClamp, FLOAT SlopeScaledDepthBias)
+{
+	assert(_interface_version >= 9);
+	static_cast<ID3D12GraphicsCommandList9 *>(_orig)->RSSetDepthBias(DepthBias, DepthBiasClamp, SlopeScaledDepthBias);
+
+#if RESHADE_ADDON >= 2
+	const reshade::api::dynamic_state states[3] = { reshade::api::dynamic_state::depth_bias, reshade::api::dynamic_state::depth_bias_clamp, reshade::api::dynamic_state::depth_bias_slope_scaled };
+	const uint32_t values[3] = { *reinterpret_cast<const uint32_t *>(&DepthBias), *reinterpret_cast<const uint32_t *>(&DepthBiasClamp), *reinterpret_cast<const uint32_t *>(&SlopeScaledDepthBias) };
+
+	reshade::invoke_addon_event<reshade::addon_event::bind_pipeline_states>(this, static_cast<uint32_t>(std::size(states)), states, values);
+#endif
+}
+void   STDMETHODCALLTYPE D3D12GraphicsCommandList::IASetIndexBufferStripCutValue(D3D12_INDEX_BUFFER_STRIP_CUT_VALUE IBStripCutValue)
+{
+	assert(_interface_version >= 9);
+	static_cast<ID3D12GraphicsCommandList9 *>(_orig)->IASetIndexBufferStripCutValue(IBStripCutValue);
+}
+
+void   STDMETHODCALLTYPE D3D12GraphicsCommandList::SetProgram(const D3D12_SET_PROGRAM_DESC *pDesc)
+{
+	assert(_interface_version >= 10);
+	static_cast<ID3D12GraphicsCommandList10 *>(_orig)->SetProgram(pDesc);
+}
+void   STDMETHODCALLTYPE D3D12GraphicsCommandList::DispatchGraph(const D3D12_DISPATCH_GRAPH_DESC *pDesc)
+{
+	assert(_interface_version >= 10);
+	static_cast<ID3D12GraphicsCommandList10 *>(_orig)->DispatchGraph(pDesc);
 }

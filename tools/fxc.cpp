@@ -113,7 +113,7 @@ int main(int argc, char *argv[])
 			else if (0 == std::strcmp(arg, "-Fo"))
 				objectfile = argv[++i];
 			else if (0 == std::strcmp(arg, "--shader-model"))
-				shader_model = std::strtol(argv[++i], nullptr, 10);
+				shader_model = static_cast<unsigned int>(std::strtoul(argv[++i], nullptr, 10));
 			else if (0 == std::strcmp(arg, "--width"))
 				buffer_width = argv[++i];
 			else if (0 == std::strcmp(arg, "--height"))
@@ -177,7 +177,7 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	reshadefx::module module;
+	reshadefx::effect_module module;
 	backend->write_result(module);
 
 	if (print_glsl || print_hlsl)

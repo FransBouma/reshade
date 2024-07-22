@@ -6,6 +6,7 @@
 #pragma once
 
 #include "effect_token.hpp"
+#include <limits>
 
 namespace reshadefx
 {
@@ -14,7 +15,7 @@ namespace reshadefx
 	/// </summary>
 	struct type
 	{
-		enum datatype : uint8_t
+		enum datatype : unsigned int
 		{
 			t_void,
 			t_bool,
@@ -26,12 +27,30 @@ namespace reshadefx
 			t_float,
 			t_string,
 			t_struct,
-			t_sampler,
-			t_storage,
-			t_texture,
+			t_texture1d,
+			t_texture2d,
+			t_texture3d,
+			t_sampler1d_int,
+			t_sampler2d_int,
+			t_sampler3d_int,
+			t_sampler1d_uint,
+			t_sampler2d_uint,
+			t_sampler3d_uint,
+			t_sampler1d_float,
+			t_sampler2d_float,
+			t_sampler3d_float,
+			t_storage1d_int,
+			t_storage2d_int,
+			t_storage3d_int,
+			t_storage1d_uint,
+			t_storage2d_uint,
+			t_storage3d_uint,
+			t_storage1d_float,
+			t_storage2d_float,
+			t_storage3d_float,
 			t_function,
 		};
-		enum qualifier : uint32_t
+		enum qualifier : unsigned int
 		{
 			q_extern = 1 << 0,
 			q_static = 1 << 1,
@@ -65,46 +84,54 @@ namespace reshadefx
 		std::string description() const;
 
 		bool has(qualifier x) const { return (qualifiers & x) == x; }
-		bool is_array() const { return array_length != 0; }
-		bool is_scalar() const { return !is_array() && !is_matrix() && !is_vector() && is_numeric(); }
-		bool is_vector() const { return rows > 1 && cols == 1; }
-		bool is_matrix() const { return rows >= 1 && cols > 1; }
-		bool is_signed() const { return base == t_min16int || base == t_int || base == t_min16float || base == t_float; }
-		bool is_numeric() const { return base >= t_bool && base <= t_float; }
+
 		bool is_void() const { return base == t_void; }
 		bool is_boolean() const { return base == t_bool; }
-		bool is_integral() const { return base >= t_bool && base <= t_uint; }
-		bool is_floating_point() const { return base == t_min16float || base == t_float; }
+		bool is_numeric() const { return base >= t_bool && base <= t_float; }
+		bool is_integral() const { return (base >= t_bool && base <= t_uint) || (base >= t_sampler1d_int && base <= t_sampler3d_uint) || (base >= t_storage1d_int && base <= t_storage3d_uint); }
+		bool is_floating_point() const { return base == t_min16float || base == t_float || (base >= t_sampler1d_float && base <= t_sampler3d_float) || (base >= t_storage1d_float && base <= t_storage3d_float); }
+		bool is_signed() const { return base == t_min16int || base == t_int || (base >= t_sampler1d_int && base <= t_sampler3d_int) || (base >= t_storage1d_int && base <= t_storage3d_int) || is_floating_point(); }
+		bool is_unsigned() const { return base == t_min16uint || base == t_uint || (base >= t_sampler1d_uint && base <= t_sampler3d_uint) || (base >= t_storage1d_uint && base <= t_storage3d_uint); }
+
 		bool is_struct() const { return base == t_struct; }
-		bool is_texture() const { return base == t_texture; }
-		bool is_sampler() const { return base == t_sampler; }
-		bool is_storage() const { return base == t_storage; }
+		bool is_object() const { return is_texture() || is_sampler() || is_storage(); }
+		bool is_texture() const { return base >= t_texture1d && base <= t_texture3d; }
+		bool is_sampler() const { return base >= t_sampler1d_int && base <= t_sampler3d_float; }
+		bool is_storage() const { return base >= t_storage1d_int && base <= t_storage3d_float; }
 		bool is_function() const { return base == t_function; }
+
+		bool is_array() const { return array_length != 0; }
+		bool is_bounded_array() const { return is_array() && array_length != UINT_MAX; }
+		bool is_unbounded_array() const { return array_length == UINT_MAX; }
+		bool is_scalar() const { return is_numeric() && !is_matrix() && !is_vector() && !is_array(); }
+		bool is_vector() const { return is_numeric() && rows > 1 && cols == 1; }
+		bool is_matrix() const { return is_numeric() && rows >= 1 && cols > 1; }
 
 		unsigned int precision() const { return base == t_min16int || base == t_min16uint || base == t_min16float ? 16 : 32; }
 		unsigned int components() const { return rows * cols; }
+		unsigned int texture_dimension() const { return base >= t_texture1d && base <= t_storage3d_float ? ((base - t_texture1d) % 3) + 1 : 0; }
 
-		friend inline bool operator==(const type &lhs, const type &rhs)
+		friend bool operator==(const type &lhs, const type &rhs)
 		{
 			return lhs.base == rhs.base && lhs.rows == rhs.rows && lhs.cols == rhs.cols && lhs.array_length == rhs.array_length && lhs.definition == rhs.definition;
 		}
-		friend inline bool operator!=(const type &lhs, const type &rhs)
+		friend bool operator!=(const type &lhs, const type &rhs)
 		{
 			return !operator==(lhs, rhs);
 		}
 
 		// Underlying base type ('int', 'float', ...)
-		datatype base = t_void;
+		datatype base : 8;
 		// Number of rows if this is a vector type
-		unsigned int rows = 0;
+		unsigned int rows : 4;
 		// Number of columns if this is a matrix type
-		unsigned int cols = 0;
+		unsigned int cols : 4;
 		// Bit mask of all the qualifiers decorating the type
-		unsigned int qualifiers = 0;
-		// Negative if an unsized array, otherwise the number of elements if this is an array type
-		int array_length = 0;
+		unsigned int qualifiers : 16;
+		// Number of elements if this is an array type, UINT_MAX if it is an unsized array
+		unsigned int array_length;
 		// ID of the matching struct if this is a struct type
-		uint32_t definition = 0;
+		uint32_t definition;
 	};
 
 	/// <summary>
@@ -143,8 +170,8 @@ namespace reshadefx
 
 			op_type op;
 			reshadefx::type from, to;
-			uint32_t index = 0;
-			signed char swizzle[4] = {};
+			uint32_t index;
+			signed char swizzle[4];
 		};
 
 		uint32_t base = 0;

@@ -5,10 +5,10 @@
 
 #include "dll_log.hpp"
 #include "hook_manager.hpp"
-#include <cstring>
-#include <algorithm>
 #include <vector>
 #include <shared_mutex>
+#include <cstring> // std::strcmp
+#include <algorithm> // std::find_if, std::remove, std::remove_if
 #include <Windows.h>
 
 enum class hook_method
@@ -42,7 +42,7 @@ static std::shared_mutex s_delayed_hook_paths_mutex;
 static std::vector<std::filesystem::path> s_delayed_hook_paths;
 static PVOID s_dll_notification_cookie = nullptr;
 
-std::vector<module_export> enumerate_module_exports(HMODULE handle)
+static std::vector<module_export> enumerate_module_exports(HMODULE handle)
 {
 	const auto image_base = reinterpret_cast<const BYTE *>(handle);
 	const auto image_header = reinterpret_cast<const IMAGE_NT_HEADERS *>(image_base +
@@ -215,7 +215,7 @@ static bool install_internal(HMODULE target_module, HMODULE replacement_module, 
 			num_installed_hooks++;
 	}
 
-	// Status is successfull if at least one match was found and hooked
+	// Status is successful if at least one match was found and hooked
 	return num_installed_hooks != 0;
 }
 static bool uninstall_internal(const char *name, reshade::hook &hook, hook_method method)
@@ -315,15 +315,15 @@ static void install_delayed_hooks(const std::filesystem::path &loaded_path)
 	{
 		const auto remove = std::remove_if(s_delayed_hook_paths.begin(), s_delayed_hook_paths.end(),
 			[&loaded_path](const std::filesystem::path &path) {
-			// Pin the module so it cannot be unloaded by the application and cause problems when ReShade tries to call into it afterwards
-			HMODULE delayed_handle = nullptr;
-			if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN, path.c_str(), &delayed_handle))
-				return false;
+				// Pin the module so it cannot be unloaded by the application and cause problems when ReShade tries to call into it afterwards
+				HMODULE delayed_handle = nullptr;
+				if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN, path.c_str(), &delayed_handle))
+					return false;
 
-			LOG(INFO) << "Installing delayed hooks for " << path << " (Just loaded via LoadLibrary(" << loaded_path << ")) ...";
+				LOG(INFO) << "Installing delayed hooks for " << path << " (Just loaded via LoadLibrary(" << loaded_path << ")) ...";
 
-			return install_internal(delayed_handle, g_module_handle, hook_method::function_hook) && reshade::hook::apply_queued_actions();
-		});
+				return install_internal(delayed_handle, g_module_handle, hook_method::function_hook) && reshade::hook::apply_queued_actions();
+			});
 
 		s_delayed_hook_paths.erase(remove, s_delayed_hook_paths.end());
 	}
@@ -416,18 +416,18 @@ bool reshade::hooks::install(const char *name, hook::address target, hook::addre
 	return install_internal(name, hook, hook_method::function_hook) &&
 		(queue_enable || hook::apply_queued_actions()); // Can optionally only queue up the hooks instead of installing them right away
 }
-bool reshade::hooks::install(const char *name, hook::address vtable[], unsigned int offset, hook::address replacement)
+bool reshade::hooks::install(const char *name, hook::address vtable[], size_t vtable_index, hook::address replacement)
 {
 	assert(vtable != nullptr && replacement != nullptr);
 
-	hook hook = find_internal(nullptr, replacement);
+	hook hook = find_internal(&vtable[vtable_index], replacement);
 	// Check if the hook was already installed to this virtual function table
-	if (hook.installed() && hook.target == &vtable[offset])
+	if (hook.installed())
 		// It may happen that some other third party (like NVIDIA Streamline) replaced the virtual function table entry since it was originally installed, just ignore that
-		return vtable[offset] == hook.replacement;
+		return vtable[vtable_index] == hook.replacement;
 
-	hook.target = &vtable[offset]; // Target is the address of the virtual function table entry
-	hook.trampoline = vtable[offset]; // The current function in that entry is the original function to call
+	hook.target = &vtable[vtable_index]; // Target is the address of the virtual function table entry
+	hook.trampoline = vtable[vtable_index]; // The current function in that entry is the original function to call
 	hook.replacement = replacement;
 
 	return install_internal(name, hook, hook_method::vtable_hook);

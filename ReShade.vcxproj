@@ -54,6 +54,7 @@
     <PlatformToolset>v141</PlatformToolset>
     <PlatformToolset Condition="'$(VisualStudioVersion)'=='16.0'">v142</PlatformToolset>
     <PlatformToolset Condition="'$(VisualStudioVersion)'=='17.0'">v143</PlatformToolset>
+    <VcpkgEnabled>false</VcpkgEnabled>
   </PropertyGroup>
   <PropertyGroup Label="Configuration" Condition="'$(Platform)'=='Win32'">
     <TargetName>ReShade32</TargetName>
@@ -93,6 +94,7 @@
     <Import Project="deps\ImGui.props" />
     <Import Project="deps\MinHook.props" />
     <Import Project="deps\OpenVR.props" />
+    <Import Project="deps\OpenXR.props" />
     <Import Project="deps\SPIRV.props" />
     <Import Project="deps\stb.props" />
     <Import Project="deps\utfcpp.props" />
@@ -101,6 +103,9 @@
   </ImportGroup>
   <PropertyGroup>
     <ExecutablePath>tools;$(ExecutablePath)</ExecutablePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)'=='Release' Or '$(Configuration)'=='Release Signed'">
+    <GenerateManifest>false</GenerateManifest>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
@@ -114,13 +119,14 @@
       <SDLCheck>true</SDLCheck>
       <Optimization>Disabled</Optimization>
       <AdditionalIncludeDirectories>res;source;include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>RESHADE_FX;RESHADE_GUI;RESHADE_ADDON;RESHADE_VERBOSE_LOG;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>RESHADE_FX;RESHADE_GUI;RESHADE_API_LIBRARY_EXPORT;RESHADE_ADDON=2;RESHADE_VERBOSE_LOG;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <DisableSpecificWarnings>4351;26812;28251;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <ObjectFileName>$(IntDir)%(RelativeDir)</ObjectFileName>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <FloatingPointModel>Fast</FloatingPointModel>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <AdditionalOptions>/utf-8 /Zc:char8_t- %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -133,7 +139,7 @@
       <ObjectFileOutput>res\shaders\%(Filename).cso</ObjectFileOutput>
     </FxCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>_WIN32;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;_WIN32;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
     <PreBuildEvent>
       <Command>powershell -ExecutionPolicy Bypass -File tools\update_version.ps1 res\version.h -config "$(Configuration)" -platform "$(Platform)"</Command>
@@ -145,13 +151,14 @@
       <SDLCheck>true</SDLCheck>
       <Optimization>Disabled</Optimization>
       <AdditionalIncludeDirectories>res;source;include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>RESHADE_FX;RESHADE_GUI;RESHADE_ADDON;RESHADE_VERBOSE_LOG;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>RESHADE_FX;RESHADE_GUI;RESHADE_API_LIBRARY_EXPORT;RESHADE_ADDON=2;RESHADE_VERBOSE_LOG;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <DisableSpecificWarnings>4351;26812;28251;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <ObjectFileName>$(IntDir)%(RelativeDir)</ObjectFileName>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <FloatingPointModel>Fast</FloatingPointModel>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <AdditionalOptions>/utf-8 /Zc:char8_t- %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -164,7 +171,7 @@
       <ObjectFileOutput>res\shaders\%(Filename).cso</ObjectFileOutput>
     </FxCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>_WIN64;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;_WIN64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
     <PreBuildEvent>
       <Command>powershell -ExecutionPolicy Bypass -File tools\update_version.ps1 res\version.h -config "$(Configuration)" -platform "$(Platform)"</Command>
@@ -176,13 +183,14 @@
       <SDLCheck>true</SDLCheck>
       <Optimization>Disabled</Optimization>
       <AdditionalIncludeDirectories>res;source;include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>RESHADE_FX;RESHADE_GUI;RESHADE_ADDON;RESHADE_TEST_APPLICATION;RESHADE_VERBOSE_LOG;D3D_DEBUG_INFO;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>RESHADE_FX;RESHADE_LOCALIZATION;RESHADE_GUI;RESHADE_API_LIBRARY_EXPORT;RESHADE_ADDON=2;RESHADE_TEST_APPLICATION;RESHADE_VERBOSE_LOG;D3D_DEBUG_INFO;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <DisableSpecificWarnings>4351;26812;28251;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <ObjectFileName>$(IntDir)%(RelativeDir)</ObjectFileName>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <FloatingPointModel>Fast</FloatingPointModel>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <AdditionalOptions>/utf-8 /Zc:char8_t- %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -195,7 +203,7 @@
       <ObjectFileOutput>res\shaders\%(Filename).cso</ObjectFileOutput>
     </FxCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>RESHADE_TEST_APPLICATION;_WIN32;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>RESHADE_LOCALIZATION;RESHADE_TEST_APPLICATION;_DEBUG;_WIN32;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
     <PreBuildEvent>
       <Command>powershell -ExecutionPolicy Bypass -File tools\update_version.ps1 res\version.h -config "$(Configuration)" -platform "$(Platform)"</Command>
@@ -207,13 +215,14 @@
       <SDLCheck>true</SDLCheck>
       <Optimization>Disabled</Optimization>
       <AdditionalIncludeDirectories>res;source;include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>RESHADE_FX;RESHADE_GUI;RESHADE_ADDON;RESHADE_TEST_APPLICATION;RESHADE_VERBOSE_LOG;D3D_DEBUG_INFO;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>RESHADE_FX;RESHADE_LOCALIZATION;RESHADE_GUI;RESHADE_API_LIBRARY_EXPORT;RESHADE_ADDON=2;RESHADE_TEST_APPLICATION;RESHADE_VERBOSE_LOG;D3D_DEBUG_INFO;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <DisableSpecificWarnings>4351;26812;28251;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <ObjectFileName>$(IntDir)%(RelativeDir)</ObjectFileName>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <FloatingPointModel>Fast</FloatingPointModel>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <AdditionalOptions>/utf-8 /Zc:char8_t- %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -226,7 +235,7 @@
       <ObjectFileOutput>res\shaders\%(Filename).cso</ObjectFileOutput>
     </FxCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>RESHADE_TEST_APPLICATION;_WIN64;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>RESHADE_LOCALIZATION;RESHADE_TEST_APPLICATION;_DEBUG;_WIN64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
     <PreBuildEvent>
       <Command>powershell -ExecutionPolicy Bypass -File tools\update_version.ps1 res\version.h -config "$(Configuration)" -platform "$(Platform)"</Command>
@@ -239,7 +248,7 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <AdditionalIncludeDirectories>res;source;include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>RESHADE_FX;RESHADE_GUI;RESHADE_ADDON;_HAS_EXCEPTIONS=0;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>RESHADE_FX;RESHADE_LOCALIZATION;RESHADE_GUI;RESHADE_API_LIBRARY_EXPORT;RESHADE_ADDON=2;_HAS_EXCEPTIONS=0;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <DisableSpecificWarnings>4351;26812;28251;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <ObjectFileName>$(IntDir)%(RelativeDir)</ObjectFileName>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
@@ -250,7 +259,7 @@
       <FloatingPointModel>Fast</FloatingPointModel>
       <RuntimeTypeInfo>false</RuntimeTypeInfo>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
-      <AdditionalOptions>/Zc:threadSafeInit- %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/Zc:threadSafeInit- /utf-8 /Zc:char8_t- %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -266,7 +275,7 @@
       <ObjectFileOutput>res\shaders\%(Filename).cso</ObjectFileOutput>
     </FxCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>_WIN32;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>RESHADE_LOCALIZATION;NDEBUG;_WIN32;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
     <PreBuildEvent Condition="'$(BuildingSetupTool)'!='true'">
       <Command>powershell -ExecutionPolicy Bypass -File tools\update_version.ps1 res\version.h -config "$(Configuration)" -platform "$(Platform)"</Command>
@@ -279,7 +288,7 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <AdditionalIncludeDirectories>res;source;include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>RESHADE_FX;RESHADE_GUI;RESHADE_ADDON;_HAS_EXCEPTIONS=0;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>RESHADE_FX;RESHADE_LOCALIZATION;RESHADE_GUI;RESHADE_API_LIBRARY_EXPORT;RESHADE_ADDON=2;_HAS_EXCEPTIONS=0;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <DisableSpecificWarnings>4351;26812;28251;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <ObjectFileName>$(IntDir)%(RelativeDir)</ObjectFileName>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
@@ -290,7 +299,7 @@
       <FloatingPointModel>Fast</FloatingPointModel>
       <RuntimeTypeInfo>false</RuntimeTypeInfo>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
-      <AdditionalOptions>/Zc:threadSafeInit- %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/Zc:threadSafeInit- /utf-8 /Zc:char8_t- %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -306,7 +315,7 @@
       <ObjectFileOutput>res\shaders\%(Filename).cso</ObjectFileOutput>
     </FxCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>_WIN64;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>RESHADE_LOCALIZATION;NDEBUG;_WIN64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
     <PreBuildEvent Condition="'$(BuildingSetupTool)'!='true'">
       <Command>powershell -ExecutionPolicy Bypass -File tools\update_version.ps1 res\version.h -config "$(Configuration)" -platform "$(Platform)"</Command>
@@ -329,7 +338,7 @@
       <FloatingPointModel>Fast</FloatingPointModel>
       <RuntimeTypeInfo>false</RuntimeTypeInfo>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
-      <AdditionalOptions>/Zc:threadSafeInit- %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/Zc:threadSafeInit- /utf-8 /Zc:char8_t- %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -345,7 +354,7 @@
       <ObjectFileOutput>res\shaders\%(Filename).cso</ObjectFileOutput>
     </FxCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>RESHADE_TEST_APPLICATION;_WIN32;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>RESHADE_TEST_APPLICATION;NDEBUG;_WIN32;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
     <PreBuildEvent>
       <Command>powershell -ExecutionPolicy Bypass -File tools\update_version.ps1 res\version.h -config "$(Configuration)" -platform "$(Platform)"</Command>
@@ -368,7 +377,7 @@
       <FloatingPointModel>Fast</FloatingPointModel>
       <RuntimeTypeInfo>false</RuntimeTypeInfo>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
-      <AdditionalOptions>/Zc:threadSafeInit- %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/Zc:threadSafeInit- /utf-8 /Zc:char8_t- %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -384,7 +393,7 @@
       <ObjectFileOutput>res\shaders\%(Filename).cso</ObjectFileOutput>
     </FxCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>RESHADE_TEST_APPLICATION;_WIN64;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>RESHADE_TEST_APPLICATION;NDEBUG;_WIN64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
     <PreBuildEvent>
       <Command>powershell -ExecutionPolicy Bypass -File tools\update_version.ps1 res\version.h -config "$(Configuration)" -platform "$(Platform)"</Command>
@@ -397,7 +406,7 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <AdditionalIncludeDirectories>res;source;include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>RESHADE_FX;RESHADE_GUI;RESHADE_ADDON;RESHADE_ADDON_LITE;_HAS_EXCEPTIONS=0;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>RESHADE_FX;RESHADE_LOCALIZATION;RESHADE_GUI;RESHADE_API_LIBRARY_EXPORT;RESHADE_ADDON=1;_HAS_EXCEPTIONS=0;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <DisableSpecificWarnings>4351;26812;28251;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <ObjectFileName>$(IntDir)%(RelativeDir)</ObjectFileName>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
@@ -408,7 +417,7 @@
       <FloatingPointModel>Fast</FloatingPointModel>
       <RuntimeTypeInfo>false</RuntimeTypeInfo>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
-      <AdditionalOptions>/Zc:threadSafeInit- %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/Zc:threadSafeInit- /utf-8 /Zc:char8_t- %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -425,7 +434,7 @@
       <ObjectFileOutput>res\shaders\%(Filename).cso</ObjectFileOutput>
     </FxCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>_WIN32;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>RESHADE_LOCALIZATION;NDEBUG;_WIN32;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
     <PreBuildEvent Condition="'$(BuildingSetupTool)'!='true'">
       <Command>powershell -ExecutionPolicy Bypass -File tools\update_version.ps1 res\version.h -config "$(Configuration)" -platform "$(Platform)"</Command>
@@ -441,7 +450,7 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <AdditionalIncludeDirectories>res;source;include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>RESHADE_FX;RESHADE_GUI;RESHADE_ADDON;RESHADE_ADDON_LITE;_HAS_EXCEPTIONS=0;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>RESHADE_FX;RESHADE_LOCALIZATION;RESHADE_GUI;RESHADE_API_LIBRARY_EXPORT;RESHADE_ADDON=1;_HAS_EXCEPTIONS=0;_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <DisableSpecificWarnings>4351;26812;28251;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <ObjectFileName>$(IntDir)%(RelativeDir)</ObjectFileName>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
@@ -452,7 +461,7 @@
       <FloatingPointModel>Fast</FloatingPointModel>
       <RuntimeTypeInfo>false</RuntimeTypeInfo>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
-      <AdditionalOptions>/Zc:threadSafeInit- %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/Zc:threadSafeInit- /utf-8 /Zc:char8_t- %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -469,7 +478,7 @@
       <ObjectFileOutput>res\shaders\%(Filename).cso</ObjectFileOutput>
     </FxCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>_WIN64;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>RESHADE_LOCALIZATION;NDEBUG;_WIN64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
     <PreBuildEvent Condition="'$(BuildingSetupTool)'!='true'">
       <Command>powershell -ExecutionPolicy Bypass -File tools\update_version.ps1 res\version.h -config "$(Configuration)" -platform "$(Platform)"</Command>
@@ -499,8 +508,12 @@
     </ProjectReference>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="examples\09-depth\generic_depth.cpp">
+    <ClCompile Include="examples\09-depth\generic_depth_addon.cpp">
       <!-- Force include "reshade.hpp" before anything else when creating built-in add-on, so that no Dear ImGui functions are created. -->
+      <ForcedIncludeFiles>reshade.hpp;%(ForcedIncludeFiles)</ForcedIncludeFiles>
+      <PreprocessorDefinitions>BUILTIN_ADDON;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Include="examples\15-effect_runtime_sync\runtime_sync_addon.cpp">
       <ForcedIncludeFiles>reshade.hpp;%(ForcedIncludeFiles)</ForcedIncludeFiles>
       <PreprocessorDefinitions>BUILTIN_ADDON;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
@@ -532,6 +545,7 @@
     <ClCompile Include="source\d3d11\d3d11_impl_state_block.cpp" />
     <ClCompile Include="source\d3d11\d3d11_impl_swapchain.cpp" />
     <ClCompile Include="source\d3d11\d3d11_impl_type_convert.cpp" />
+    <ClCompile Include="source\d3d11\d3d11_resource.cpp" />
     <ClCompile Include="source\d3d12\d3d12.cpp" />
     <ClCompile Include="source\d3d12\d3d12_command_list.cpp" />
     <ClCompile Include="source\d3d12\d3d12_command_queue.cpp" />
@@ -580,6 +594,10 @@
     <ClCompile Include="source\hook_manager.cpp" />
     <ClCompile Include="source\imgui_code_editor.cpp" />
     <ClCompile Include="source\imgui_function_table.cpp" />
+    <ClCompile Include="source\imgui_function_table_18600.cpp" />
+    <ClCompile Include="source\imgui_function_table_18971.cpp" />
+    <ClCompile Include="source\imgui_function_table_19000.cpp" />
+    <ClCompile Include="source\imgui_function_table_19040.cpp" />
     <ClCompile Include="source\imgui_widgets.cpp" />
     <ClCompile Include="source\ini_file.cpp" />
     <ClCompile Include="source\input.cpp" />
@@ -595,14 +613,20 @@
     <ClCompile Include="source\opengl\opengl_impl_state_block.cpp" />
     <ClCompile Include="source\opengl\opengl_impl_swapchain.cpp" />
     <ClCompile Include="source\opengl\opengl_impl_type_convert.cpp" />
-    <ClCompile Include="source\openvr\openvr.cpp" />
+    <ClCompile Include="source\openvr\openvr_hooks.cpp" />
     <ClCompile Include="source\openvr\openvr_impl_swapchain.cpp" />
+    <ClCompile Include="source\openxr\openxr_hooks.cpp" />
+    <ClCompile Include="source\openxr\openxr_hooks_instance.cpp" />
+    <ClCompile Include="source\openxr\openxr_hooks_session.cpp" />
+    <ClCompile Include="source\openxr\openxr_impl_swapchain.cpp" />
     <ClCompile Include="source\platform_utils.cpp" />
     <ClCompile Include="source\runtime.cpp" />
     <ClCompile Include="source\runtime_api.cpp" />
     <ClCompile Include="source\runtime_gui.cpp" />
     <ClCompile Include="source\runtime_gui_vr.cpp" />
+    <ClCompile Include="source\runtime_manager.cpp" />
     <ClCompile Include="source\runtime_update_check.cpp" />
+    <ClCompile Include="source\state_block.cpp" />
     <ClCompile Include="source\vulkan\vulkan_hooks.cpp" />
     <ClCompile Include="source\vulkan\vulkan_hooks_cmd.cpp" />
     <ClCompile Include="source\vulkan\vulkan_hooks_device.cpp" />
@@ -630,6 +654,7 @@
     <ClInclude Include="include\reshade_events.hpp" />
     <ClInclude Include="include\reshade_overlay.hpp" />
     <ClInclude Include="res\fonts\forkawesome.h" />
+    <ClInclude Include="res\fonts\glyph_ranges.hpp" />
     <ClInclude Include="res\resource.h" />
     <ClInclude Include="res\version.h" />
     <ClInclude Include="source\addon.hpp" />
@@ -652,6 +677,8 @@
     <ClInclude Include="source\d3d11\d3d11_impl_state_block.hpp" />
     <ClInclude Include="source\d3d11\d3d11_impl_swapchain.hpp" />
     <ClInclude Include="source\d3d11\d3d11_impl_type_convert.hpp" />
+    <ClInclude Include="source\d3d11\d3d11_resource.hpp" />
+    <ClInclude Include="source\d3d11\d3d11_resource_call_vtable.inl" />
     <ClInclude Include="source\d3d12\d3d12_command_list.hpp" />
     <ClInclude Include="source\d3d12\d3d12_command_queue.hpp" />
     <ClInclude Include="source\d3d12\d3d12_command_queue_downlevel.hpp" />
@@ -684,21 +711,32 @@
     <ClInclude Include="source\hook.hpp" />
     <ClInclude Include="source\hook_manager.hpp" />
     <ClInclude Include="source\imgui_code_editor.hpp" />
+    <ClInclude Include="source\imgui_function_table_18600.hpp" />
+    <ClInclude Include="source\imgui_function_table_18971.hpp" />
+    <ClInclude Include="source\imgui_function_table_19000.hpp" />
+    <ClInclude Include="source\imgui_function_table_19040.hpp" />
     <ClInclude Include="source\imgui_widgets.hpp" />
     <ClInclude Include="source\ini_file.hpp" />
     <ClInclude Include="source\input.hpp" />
     <ClInclude Include="source\input_gamepad.hpp" />
+    <ClInclude Include="source\localization.hpp" />
     <ClInclude Include="source\lockfree_linear_map.hpp" />
+    <ClInclude Include="source\moving_average.hpp" />
     <ClInclude Include="source\opengl\opengl_hooks.hpp" />
     <ClInclude Include="source\opengl\opengl_impl_device.hpp" />
-    <ClInclude Include="source\opengl\opengl_impl_render_context.hpp" />
+    <ClInclude Include="source\opengl\opengl_impl_device_context.hpp" />
     <ClInclude Include="source\opengl\opengl_impl_state_block.hpp" />
     <ClInclude Include="source\opengl\opengl_impl_swapchain.hpp" />
     <ClInclude Include="source\opengl\opengl_impl_type_convert.hpp" />
     <ClInclude Include="source\openvr\openvr_impl_swapchain.hpp" />
+    <ClInclude Include="source\openxr\openxr_hooks.hpp" />
+    <ClInclude Include="source\openxr\openxr_impl_swapchain.hpp" />
     <ClInclude Include="source\platform_utils.hpp" />
+    <ClInclude Include="source\reshade_api_object_impl.hpp" />
     <ClInclude Include="source\runtime.hpp" />
-    <ClInclude Include="source\runtime_objects.hpp" />
+    <ClInclude Include="source\runtime_internal.hpp" />
+    <ClInclude Include="source\runtime_manager.hpp" />
+    <ClInclude Include="source\state_block.hpp" />
     <ClInclude Include="source\vulkan\vulkan_hooks.hpp" />
     <ClInclude Include="source\vulkan\vulkan_impl_command_list.hpp" />
     <ClInclude Include="source\vulkan\vulkan_impl_command_list_immediate.hpp" />
@@ -713,7 +751,10 @@
   <ItemGroup>
     <None Include="res\exports.def" />
     <None Include="res\fonts\forkawesome.inl" />
-    <None Include="res\resource.rc2" />
+    <None Include="res\shaders\imgui_ps_430.glsl" />
+    <None Include="res\shaders\imgui_vs_430.glsl" />
+    <None Include="res\shaders\mipmap_cs_430.glsl" />
+    <None Include="res\version.rc2" />
     <None Include="tools\update_version.ps1" />
   </ItemGroup>
   <ItemGroup>
@@ -731,6 +772,10 @@
       <ShaderType>Pixel</ShaderType>
       <ShaderModel>4.0</ShaderModel>
     </FxCompile>
+    <FxCompile Include="res\shaders\imgui_ps_4_0_hdr.hlsl">
+      <ShaderType>Pixel</ShaderType>
+      <ShaderModel>4.0</ShaderModel>
+    </FxCompile>
     <FxCompile Include="res\shaders\imgui_vs_3_0.hlsl">
       <ShaderType>Vertex</ShaderType>
       <ShaderModel>3.0</ShaderModel>
@@ -739,19 +784,25 @@
       <ShaderType>Vertex</ShaderType>
       <ShaderModel>4.0</ShaderModel>
     </FxCompile>
-    <FxCompile Include="res\shaders\mipmap_cs.hlsl">
+    <FxCompile Include="res\shaders\mipmap_cs_5_0.hlsl">
       <ShaderType>Compute</ShaderType>
       <ShaderModel>5.0</ShaderModel>
     </FxCompile>
   </ItemGroup>
   <ItemGroup>
-    <CustomBuild Include="res\shaders\imgui_ps.glsl">
+    <CustomBuild Include="res\shaders\imgui_ps_450.glsl">
       <FileType>Document</FileType>
       <Command>"$(VK_SDK_PATH)\Bin\glslangValidator.exe" -V -S frag "%(FullPath)" -o "res\shaders\%(Filename).spv"</Command>
       <Outputs>res\shaders\%(Filename).spv</Outputs>
       <ExcludedFromBuild Condition="!Exists('$(VK_SDK_PATH)\Bin\glslangValidator.exe')">true</ExcludedFromBuild>
     </CustomBuild>
-    <CustomBuild Include="res\shaders\imgui_vs.glsl">
+    <CustomBuild Include="res\shaders\imgui_ps_450_hdr.glsl">
+      <FileType>Document</FileType>
+      <Command>"$(VK_SDK_PATH)\Bin\glslangValidator.exe" -V -S frag "%(FullPath)" -o "res\shaders\%(Filename).spv"</Command>
+      <Outputs>res\shaders\%(Filename).spv</Outputs>
+      <ExcludedFromBuild Condition="!Exists('$(VK_SDK_PATH)\Bin\glslangValidator.exe')">true</ExcludedFromBuild>
+    </CustomBuild>
+    <CustomBuild Include="res\shaders\imgui_vs_450.glsl">
       <FileType>Document</FileType>
       <Command>"$(VK_SDK_PATH)\Bin\glslangValidator.exe" -V -S vert "%(FullPath)" -o "res\shaders\%(Filename).spv"</Command>
       <Outputs>res\shaders\%(Filename).spv</Outputs>

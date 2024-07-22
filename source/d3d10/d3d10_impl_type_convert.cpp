@@ -3,11 +3,9 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#include <vector>
-#include <limits>
-#include "com_ptr.hpp"
-#include "reshade_api_pipeline.hpp"
 #include "d3d10_impl_type_convert.hpp"
+#include <cassert>
+#include <algorithm> // std::copy_n
 
 auto reshade::d3d10::convert_format(api::format format) -> DXGI_FORMAT
 {
@@ -170,16 +168,13 @@ static void convert_misc_flags_to_resource_flags(UINT misc_flags, reshade::api::
 		flags |= api::resource_flags::generate_mipmaps;
 }
 
-auto reshade::d3d10::convert_access_flags(api::map_access access, bool is_vertex_or_index_buffer) -> D3D10_MAP
+auto reshade::d3d10::convert_access_flags(api::map_access access) -> D3D10_MAP
 {
 	switch (access)
 	{
 	case api::map_access::read_only:
 		return D3D10_MAP_READ;
 	case api::map_access::write_only:
-		if (is_vertex_or_index_buffer)
-			// Use no overwrite flag to simulate D3D12 behavior of there only being one allocation that backs a buffer (instead of the runtime managing multiple ones behind the scenes)
-			return D3D10_MAP_WRITE_NO_OVERWRITE;
 		return D3D10_MAP_WRITE;
 	case api::map_access::read_write:
 		return D3D10_MAP_READ_WRITE;
@@ -375,7 +370,7 @@ reshade::api::resource_desc reshade::d3d10::convert_resource_desc(const D3D10_TE
 void reshade::d3d10::convert_resource_view_desc(const api::resource_view_desc &desc, D3D10_DEPTH_STENCIL_VIEW_DESC &internal_desc)
 {
 	internal_desc.Format = convert_format(desc.format);
-	assert(desc.type != api::resource_view_type::buffer && desc.texture.level_count == 1);
+	assert(desc.type != api::resource_view_type::buffer);
 	switch (desc.type) // Do not modifiy description in case type is 'resource_view_type::unknown'
 	{
 	case api::resource_view_type::texture_1d:
@@ -411,9 +406,15 @@ void reshade::d3d10::convert_resource_view_desc(const api::resource_view_desc &d
 void reshade::d3d10::convert_resource_view_desc(const api::resource_view_desc &desc, D3D10_RENDER_TARGET_VIEW_DESC &internal_desc)
 {
 	internal_desc.Format = convert_format(desc.format);
-	assert(desc.type != api::resource_view_type::buffer && desc.texture.level_count == 1);
 	switch (desc.type) // Do not modifiy description in case type is 'resource_view_type::unknown'
 	{
+	case api::resource_view_type::buffer:
+		internal_desc.ViewDimension = D3D10_RTV_DIMENSION_BUFFER;
+		assert(desc.buffer.offset <= std::numeric_limits<UINT>::max());
+		internal_desc.Buffer.FirstElement = static_cast<UINT>(desc.buffer.offset);
+		assert(desc.buffer.size <= std::numeric_limits<UINT>::max());
+		internal_desc.Buffer.NumElements = static_cast<UINT>(desc.buffer.size);
+		break;
 	case api::resource_view_type::texture_1d:
 		internal_desc.ViewDimension = D3D10_RTV_DIMENSION_TEXTURE1D;
 		internal_desc.Texture1D.MipSlice = desc.texture.first_level;
@@ -570,6 +571,11 @@ reshade::api::resource_view_desc reshade::d3d10::convert_resource_view_desc(cons
 	desc.texture.level_count = 1;
 	switch (internal_desc.ViewDimension)
 	{
+	case D3D10_RTV_DIMENSION_BUFFER:
+		desc.type = api::resource_view_type::buffer;
+		desc.buffer.offset = internal_desc.Buffer.FirstElement;
+		desc.buffer.size = internal_desc.Buffer.NumElements;
+		break;
 	case D3D10_RTV_DIMENSION_TEXTURE1D:
 		desc.type = api::resource_view_type::texture_1d;
 		desc.texture.first_level = internal_desc.Texture1D.MipSlice;
@@ -685,43 +691,32 @@ reshade::api::resource_view_desc reshade::d3d10::convert_resource_view_desc(cons
 	}
 }
 
-void reshade::d3d10::convert_input_layout_desc(uint32_t count, const api::input_element *elements, std::vector<D3D10_INPUT_ELEMENT_DESC> &internal_elements)
+void reshade::d3d10::convert_input_element(const api::input_element &desc, D3D10_INPUT_ELEMENT_DESC &internal_desc)
 {
-	internal_elements.reserve(count);
+	internal_desc.SemanticName = desc.semantic;
+	internal_desc.SemanticIndex = desc.semantic_index;
+	internal_desc.Format = convert_format(desc.format);
+	internal_desc.InputSlot = desc.buffer_binding;
+	internal_desc.AlignedByteOffset = desc.offset;
+	internal_desc.InputSlotClass = desc.instance_step_rate > 0 ? D3D10_INPUT_PER_INSTANCE_DATA : D3D10_INPUT_PER_VERTEX_DATA;
+	internal_desc.InstanceDataStepRate = desc.instance_step_rate;
 
-	for (uint32_t i = 0; i < count; ++i)
+	if (desc.semantic == nullptr)
 	{
-		const api::input_element &element = elements[i];
-
-		D3D10_INPUT_ELEMENT_DESC &internal_element = internal_elements.emplace_back();
-		internal_element.SemanticName = element.semantic;
-		internal_element.SemanticIndex = element.semantic_index;
-		internal_element.Format = convert_format(element.format);
-		internal_element.InputSlot = element.buffer_binding;
-		internal_element.AlignedByteOffset = element.offset;
-		internal_element.InputSlotClass = element.instance_step_rate > 0 ? D3D10_INPUT_PER_INSTANCE_DATA : D3D10_INPUT_PER_VERTEX_DATA;
-		internal_element.InstanceDataStepRate = element.instance_step_rate;
+		internal_desc.SemanticName = "TEXCOORD";
+		internal_desc.SemanticIndex = desc.location;
 	}
 }
-std::vector<reshade::api::input_element> reshade::d3d10::convert_input_layout_desc(UINT count, const D3D10_INPUT_ELEMENT_DESC *internal_elements)
+reshade::api::input_element reshade::d3d10::convert_input_element(const D3D10_INPUT_ELEMENT_DESC &internal_desc)
 {
-	std::vector<reshade::api::input_element> elements;
-	elements.reserve(count);
-
-	for (UINT i = 0; i < count; ++i)
-	{
-		const D3D10_INPUT_ELEMENT_DESC &internal_element = internal_elements[i];
-
-		api::input_element &element = elements.emplace_back();
-		element.semantic = internal_element.SemanticName;
-		element.semantic_index = internal_element.SemanticIndex;
-		element.format = convert_format(internal_element.Format);
-		element.buffer_binding = internal_element.InputSlot;
-		element.offset = internal_element.AlignedByteOffset;
-		element.instance_step_rate = internal_element.InstanceDataStepRate;
-	}
-
-	return elements;
+	api::input_element desc = {};
+	desc.semantic = internal_desc.SemanticName;
+	desc.semantic_index = internal_desc.SemanticIndex;
+	desc.format = convert_format(internal_desc.Format);
+	desc.buffer_binding = internal_desc.InputSlot;
+	desc.offset = internal_desc.AlignedByteOffset;
+	desc.instance_step_rate = internal_desc.InstanceDataStepRate;
+	return desc;
 }
 
 void reshade::d3d10::convert_blend_desc(const api::blend_desc &desc, D3D10_BLEND_DESC &internal_desc)
@@ -743,10 +738,22 @@ void reshade::d3d10::convert_blend_desc(const api::blend_desc &desc, D3D10_BLEND
 void reshade::d3d10::convert_blend_desc(const api::blend_desc &desc, D3D10_BLEND_DESC1 &internal_desc)
 {
 	internal_desc.AlphaToCoverageEnable = desc.alpha_to_coverage_enable;
-	internal_desc.IndependentBlendEnable = TRUE;
+	internal_desc.IndependentBlendEnable = FALSE;
 
 	for (UINT i = 0; i < 8; ++i)
 	{
+		if (desc.blend_enable[i] != desc.blend_enable[0] ||
+			desc.source_color_blend_factor[i] != desc.source_color_blend_factor[0] ||
+			desc.dest_color_blend_factor[i] != desc.dest_color_blend_factor[0] ||
+			desc.color_blend_op[i] != desc.color_blend_op[0] ||
+			desc.source_alpha_blend_factor[i] != desc.source_alpha_blend_factor[0] ||
+			desc.dest_alpha_blend_factor[i] != desc.dest_alpha_blend_factor[0] ||
+			desc.alpha_blend_op[i] != desc.alpha_blend_op[0] ||
+			desc.render_target_write_mask[i] != desc.render_target_write_mask[0])
+			internal_desc.IndependentBlendEnable = TRUE;
+
+		assert(!desc.logic_op_enable[i]);
+
 		internal_desc.RenderTarget[i].BlendEnable = desc.blend_enable[i];
 		internal_desc.RenderTarget[i].SrcBlend = convert_blend_factor(desc.source_color_blend_factor[i]);
 		internal_desc.RenderTarget[i].DestBlend = convert_blend_factor(desc.dest_color_blend_factor[i]);
@@ -768,13 +775,18 @@ reshade::api::blend_desc reshade::d3d10::convert_blend_desc(const D3D10_BLEND_DE
 		for (UINT i = 0; i < 8; ++i)
 		{
 			desc.blend_enable[i] = internal_desc->BlendEnable[i];
-			desc.source_color_blend_factor[i] = convert_blend_factor(internal_desc->SrcBlend);
-			desc.dest_color_blend_factor[i] = convert_blend_factor(internal_desc->DestBlend);
-			desc.color_blend_op[i] = convert_blend_op(internal_desc->BlendOp);
-			desc.source_alpha_blend_factor[i] = convert_blend_factor(internal_desc->SrcBlendAlpha);
-			desc.dest_alpha_blend_factor[i] = convert_blend_factor(internal_desc->DestBlendAlpha);
-			desc.alpha_blend_op[i] = convert_blend_op(internal_desc->BlendOpAlpha);
-			desc.render_target_write_mask[i] = internal_desc->RenderTargetWriteMask[i];
+
+			// Only convert blend state if blending is enabled (since some applications leave these uninitialized in this case)
+			if (internal_desc->BlendEnable[i])
+			{
+				desc.source_color_blend_factor[i] = convert_blend_factor(internal_desc->SrcBlend);
+				desc.dest_color_blend_factor[i] = convert_blend_factor(internal_desc->DestBlend);
+				desc.color_blend_op[i] = convert_blend_op(internal_desc->BlendOp);
+				desc.source_alpha_blend_factor[i] = convert_blend_factor(internal_desc->SrcBlendAlpha);
+				desc.dest_alpha_blend_factor[i] = convert_blend_factor(internal_desc->DestBlendAlpha);
+				desc.alpha_blend_op[i] = convert_blend_op(internal_desc->BlendOpAlpha);
+				desc.render_target_write_mask[i] = internal_desc->RenderTargetWriteMask[i];
+			}
 		}
 	}
 	else
@@ -885,16 +897,16 @@ void reshade::d3d10::convert_depth_stencil_desc(const api::depth_stencil_desc &d
 	internal_desc.DepthWriteMask = desc.depth_write_mask ? D3D10_DEPTH_WRITE_MASK_ALL : D3D10_DEPTH_WRITE_MASK_ZERO;
 	internal_desc.DepthFunc = convert_compare_op(desc.depth_func);
 	internal_desc.StencilEnable = desc.stencil_enable;
-	internal_desc.StencilReadMask = desc.stencil_read_mask;
-	internal_desc.StencilWriteMask = desc.stencil_write_mask;
-	internal_desc.BackFace.StencilFailOp = convert_stencil_op(desc.back_stencil_fail_op);
-	internal_desc.BackFace.StencilDepthFailOp = convert_stencil_op(desc.back_stencil_depth_fail_op);
-	internal_desc.BackFace.StencilPassOp = convert_stencil_op(desc.back_stencil_pass_op);
-	internal_desc.BackFace.StencilFunc = convert_compare_op(desc.back_stencil_func);
+	internal_desc.StencilReadMask = desc.front_stencil_read_mask;
+	internal_desc.StencilWriteMask = desc.front_stencil_write_mask;
 	internal_desc.FrontFace.StencilFailOp = convert_stencil_op(desc.front_stencil_fail_op);
 	internal_desc.FrontFace.StencilDepthFailOp = convert_stencil_op(desc.front_stencil_depth_fail_op);
 	internal_desc.FrontFace.StencilPassOp = convert_stencil_op(desc.front_stencil_pass_op);
 	internal_desc.FrontFace.StencilFunc = convert_compare_op(desc.front_stencil_func);
+	internal_desc.BackFace.StencilFailOp = convert_stencil_op(desc.back_stencil_fail_op);
+	internal_desc.BackFace.StencilDepthFailOp = convert_stencil_op(desc.back_stencil_depth_fail_op);
+	internal_desc.BackFace.StencilPassOp = convert_stencil_op(desc.back_stencil_pass_op);
+	internal_desc.BackFace.StencilFunc = convert_compare_op(desc.back_stencil_func);
 }
 reshade::api::depth_stencil_desc reshade::d3d10::convert_depth_stencil_desc(const D3D10_DEPTH_STENCIL_DESC *internal_desc)
 {
@@ -906,16 +918,20 @@ reshade::api::depth_stencil_desc reshade::d3d10::convert_depth_stencil_desc(cons
 		desc.depth_write_mask = internal_desc->DepthWriteMask != D3D10_DEPTH_WRITE_MASK_ZERO;
 		desc.depth_func = convert_compare_op(internal_desc->DepthFunc);
 		desc.stencil_enable = internal_desc->StencilEnable;
-		desc.stencil_read_mask = internal_desc->StencilReadMask;
-		desc.stencil_write_mask = internal_desc->StencilWriteMask;
-		desc.back_stencil_fail_op = convert_stencil_op(internal_desc->BackFace.StencilFailOp);
-		desc.back_stencil_depth_fail_op = convert_stencil_op(internal_desc->BackFace.StencilDepthFailOp);
-		desc.back_stencil_pass_op = convert_stencil_op(internal_desc->BackFace.StencilPassOp);
-		desc.back_stencil_func = convert_compare_op(internal_desc->BackFace.StencilFunc);
+		desc.front_stencil_read_mask = internal_desc->StencilReadMask;
+		desc.front_stencil_write_mask = internal_desc->StencilWriteMask;
+		desc.front_stencil_reference_value = D3D10_DEFAULT_STENCIL_REFERENCE;
+		desc.front_stencil_func = convert_compare_op(internal_desc->FrontFace.StencilFunc);
 		desc.front_stencil_fail_op = convert_stencil_op(internal_desc->FrontFace.StencilFailOp);
 		desc.front_stencil_depth_fail_op = convert_stencil_op(internal_desc->FrontFace.StencilDepthFailOp);
 		desc.front_stencil_pass_op = convert_stencil_op(internal_desc->FrontFace.StencilPassOp);
-		desc.front_stencil_func = convert_compare_op(internal_desc->FrontFace.StencilFunc);
+		desc.back_stencil_read_mask = internal_desc->StencilReadMask;
+		desc.back_stencil_write_mask = internal_desc->StencilWriteMask;
+		desc.back_stencil_reference_value = D3D10_DEFAULT_STENCIL_REFERENCE;
+		desc.back_stencil_func = convert_compare_op(internal_desc->BackFace.StencilFunc);
+		desc.back_stencil_fail_op = convert_stencil_op(internal_desc->BackFace.StencilFailOp);
+		desc.back_stencil_depth_fail_op = convert_stencil_op(internal_desc->BackFace.StencilDepthFailOp);
+		desc.back_stencil_pass_op = convert_stencil_op(internal_desc->BackFace.StencilPassOp);
 	}
 	else
 	{
@@ -923,16 +939,20 @@ reshade::api::depth_stencil_desc reshade::d3d10::convert_depth_stencil_desc(cons
 		desc.depth_enable = true;
 		desc.depth_write_mask = true;
 		desc.depth_func = api::compare_op::less;
-		desc.stencil_read_mask = D3D10_DEFAULT_STENCIL_READ_MASK;
-		desc.stencil_write_mask = D3D10_DEFAULT_STENCIL_WRITE_MASK;
-		desc.back_stencil_fail_op = api::stencil_op::keep;
-		desc.back_stencil_depth_fail_op = api::stencil_op::keep;
-		desc.back_stencil_pass_op = api::stencil_op::keep;
-		desc.back_stencil_func = api::compare_op::always;
+		desc.front_stencil_read_mask = D3D10_DEFAULT_STENCIL_READ_MASK;
+		desc.front_stencil_write_mask = D3D10_DEFAULT_STENCIL_WRITE_MASK;
+		desc.front_stencil_reference_value = D3D10_DEFAULT_STENCIL_REFERENCE;
+		desc.front_stencil_func = api::compare_op::always;
 		desc.front_stencil_fail_op = api::stencil_op::keep;
 		desc.front_stencil_depth_fail_op = api::stencil_op::keep;
 		desc.front_stencil_pass_op = api::stencil_op::keep;
-		desc.front_stencil_func = api::compare_op::always;
+		desc.back_stencil_read_mask = D3D10_DEFAULT_STENCIL_READ_MASK;
+		desc.back_stencil_write_mask = D3D10_DEFAULT_STENCIL_WRITE_MASK;
+		desc.back_stencil_reference_value = D3D10_DEFAULT_STENCIL_REFERENCE;
+		desc.back_stencil_func = api::compare_op::always;
+		desc.back_stencil_fail_op = api::stencil_op::keep;
+		desc.back_stencil_depth_fail_op = api::stencil_op::keep;
+		desc.back_stencil_pass_op = api::stencil_op::keep;
 	}
 
 	return desc;

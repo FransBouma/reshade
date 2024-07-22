@@ -7,8 +7,6 @@
 
 #if RESHADE_ADDON
 
-#include <d3d9.h>
-
 struct Direct3DDevice9;
 
 struct DECLSPEC_UUID("0F433AEB-B389-4589-81A7-9DB59F34CB55") Direct3DDepthStencilSurface9 final : IDirect3DSurface9
@@ -39,15 +37,16 @@ struct DECLSPEC_UUID("0F433AEB-B389-4589-81A7-9DB59F34CB55") Direct3DDepthStenci
 	HRESULT STDMETHODCALLTYPE ReleaseDC(HDC hdc) override;
 	#pragma endregion
 
-	ULONG _ref = 1;
 	IDirect3DSurface9 *_orig;
+	ULONG _ref = 1;
+
 	Direct3DDevice9 *const _device;
 	const D3DSURFACE_DESC _orig_desc;
 };
 
 #endif
 
-#if RESHADE_ADDON && !RESHADE_ADDON_LITE
+#if RESHADE_ADDON >= 2
 
 #undef IDirect3DSurface9_LockRect
 #undef IDirect3DSurface9_UnlockRect

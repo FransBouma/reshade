@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#include "version.h"
 #include "runtime.hpp"
 #include <Windows.h>
 #include <WinInet.h>
@@ -13,26 +12,29 @@ struct scoped_handle
 	scoped_handle(HINTERNET handle) : handle(handle) {}
 	~scoped_handle() { InternetCloseHandle(handle); }
 
-	inline operator HINTERNET() const { return handle; }
+	operator HINTERNET() const { return handle; }
 
 private:
 	HINTERNET handle;
 };
 
-bool reshade::runtime::check_for_update(unsigned long latest_version[3])
-{
-	std::memset(latest_version, 0, 3 * sizeof(unsigned long));
+unsigned int reshade::runtime::s_latest_version[3] = {};
 
-#ifdef NDEBUG
+void reshade::runtime::check_for_update()
+{
+#if defined(NDEBUG) && !defined(RESHADE_TEST_APPLICATION)
+	if (s_latest_version[0] != 0)
+		return;
+
 	const scoped_handle handle = InternetOpen(TEXT("reshade"), INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
 	if (handle == nullptr)
-		return false;
+		return;
 
 	constexpr auto api_url = TEXT("https://api.github.com/repos/crosire/reshade/tags");
 
 	const scoped_handle request = InternetOpenUrl(handle, api_url, nullptr, 0, INTERNET_FLAG_RELOAD | INTERNET_FLAG_PRAGMA_NOCACHE | INTERNET_FLAG_NO_CACHE_WRITE, 0);
 	if (request == nullptr)
-		return false;
+		return;
 
 	// Set some timeouts to avoid stalling startup because of a broken Internet connection
 	DWORD timeout = 2000; // 2 seconds
@@ -45,21 +47,15 @@ bool reshade::runtime::check_for_update(unsigned long latest_version[3])
 		response_data[len] = '\0';
 
 		const char *version_major_offset = std::strchr(response_data, 'v');
-		if (version_major_offset == nullptr) return false; else version_major_offset++;
+		if (version_major_offset == nullptr) return; else version_major_offset++;
 		const char *version_minor_offset = std::strchr(version_major_offset, '.');
-		if (version_minor_offset == nullptr) return false; else version_minor_offset++;
+		if (version_minor_offset == nullptr) return; else version_minor_offset++;
 		const char *version_revision_offset = std::strchr(version_minor_offset, '.');
-		if (version_revision_offset == nullptr) return false; else version_revision_offset++;
+		if (version_revision_offset == nullptr) return; else version_revision_offset++;
 
-		latest_version[0] = std::strtoul(version_major_offset, nullptr, 10);
-		latest_version[1] = std::strtoul(version_minor_offset, nullptr, 10);
-		latest_version[2] = std::strtoul(version_revision_offset, nullptr, 10);
-
-		return (latest_version[0] > VERSION_MAJOR) ||
-			(latest_version[0] == VERSION_MAJOR && latest_version[1] > VERSION_MINOR) ||
-			(latest_version[0] == VERSION_MAJOR && latest_version[1] == VERSION_MINOR && latest_version[2] > VERSION_REVISION);
+		s_latest_version[0] = static_cast<unsigned int>(std::strtoul(version_major_offset, nullptr, 10));
+		s_latest_version[1] = static_cast<unsigned int>(std::strtoul(version_minor_offset, nullptr, 10));
+		s_latest_version[2] = static_cast<unsigned int>(std::strtoul(version_revision_offset, nullptr, 10));
 	}
 #endif
-
-	return false;
 }
