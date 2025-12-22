@@ -6,6 +6,7 @@
 #pragma once
 
 #include "reshade_api_resource.hpp"
+#include <cstddef>
 
 namespace reshade { namespace api
 {
@@ -117,7 +118,7 @@ namespace reshade { namespace api
 		/// <summary>
 		/// Descriptors are an array of <see cref="resource_view"/>.
 		/// </summary>
-		acceleration_structure = 8
+		acceleration_structure = 10
 	};
 
 	/// <summary>
